@@ -121,9 +121,14 @@ foreach ($adapter in $adapters) {
 }
 
 # 5. Flush DNS Cache
-Write-Host "`n[*] [5/5] Flushing DNS client cache..." -ForegroundColor Yellow
+Write-Host "`n[*] [5/6] Flushing DNS client cache..." -ForegroundColor Yellow
 Clear-DnsClientCache
 Write-Host "    [OK] DNS cache flushed." -ForegroundColor Green
+
+# 6. Restore ExecutionPolicy
+Write-Host "`n[*] [6/6] Restoring PowerShell ExecutionPolicy..." -ForegroundColor Yellow
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Undefined -Force -ErrorAction SilentlyContinue
+Write-Host "    [OK] ExecutionPolicy restored." -ForegroundColor Green
 
 Write-Host "`n==========================================================" -ForegroundColor Green
 Write-Host "   ROLLBACK COMPLETE: System is back to v0-baseline state  " -ForegroundColor Green
