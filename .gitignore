@@ -1,0 +1,4 @@
+# ClaudeCage gitignore
+*.tmp
+*.log
+!/backups/**
