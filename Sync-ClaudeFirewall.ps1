@@ -103,7 +103,7 @@ function Get-CageTargetBinaries {
     $cliCandidates = @(
         "$env:APPDATA\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe",
         "$env:LOCALAPPDATA\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe",
-        "C:\Users\decop\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"
+        "$env:USERPROFILE\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"
     )
     foreach ($cand in $cliCandidates) {
         if (Test-Path $cand) {

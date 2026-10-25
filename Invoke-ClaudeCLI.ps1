@@ -85,8 +85,7 @@ $env:PATH = "$CageBin;$env:PATH"
 $claudeCliExe = $null
 $cliCandidates = @(
     "$env:APPDATA\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe",
-    "$env:LOCALAPPDATA\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe",
-    "C:\Users\decop\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"
+    "$env:LOCALAPPDATA\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"
 )
 
 foreach ($cand in $cliCandidates) {
@@ -106,6 +105,30 @@ if (-not $claudeCliExe) {
 if (-not $claudeCliExe) {
     Write-Error "[!] Claude Code CLI executable not found!"
     exit 1
+}
+
+# Verify Binary is Protected by WFP Kill Switch
+$resolvedTarget = [System.IO.Path]::GetFullPath($claudeCliExe)
+$appFilters = Get-NetFirewallRule -Group "ClaudeKillSwitch" -ErrorAction SilentlyContinue | Get-NetFirewallApplicationFilter
+$protectedPrograms = @($appFilters | Select-Object -ExpandProperty Program -Unique | Where-Object { $_ -and $_ -ne "Any" } | ForEach-Object {
+    try { [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($_)) } catch { $_ }
+})
+
+if ($protectedPrograms -notcontains $resolvedTarget) {
+    Write-Host "[!] Claude CLI binary is not yet covered by WFP Kill Switch rules." -ForegroundColor Yellow
+    Write-Host "    Requesting Administrator privileges to update firewall rules..." -ForegroundColor Yellow
+    $p = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$syncScript`" -Enforce" -Verb RunAs -PassThru -Wait
+    
+    # Re-verify
+    $appFiltersAfter = Get-NetFirewallRule -Group "ClaudeKillSwitch" -ErrorAction SilentlyContinue | Get-NetFirewallApplicationFilter
+    $protectedAfter = @($appFiltersAfter | Select-Object -ExpandProperty Program -Unique | Where-Object { $_ -and $_ -ne "Any" } | ForEach-Object {
+        try { [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($_)) } catch { $_ }
+    })
+    
+    if ($protectedAfter -notcontains $resolvedTarget) {
+        Write-Error "[SECURITY ALERT] Failed to enforce WFP Kill Switch for Claude CLI! Execution aborted to prevent real IP leak."
+        exit 1
+    }
 }
 
 # 6. Execute Claude CLI with forwarded arguments

@@ -80,13 +80,18 @@ if ($isVpnUp) {
 # 3. Sync / Verify WFP Kill Switch Rules
 Write-Host "[*] [3/5] Verifying 24/7 WFP Fail-Closed Kill Switch rules..." -ForegroundColor Yellow
 $syncScript = Join-Path $CageRoot "Sync-ClaudeFirewall.ps1"
-if (Test-Path $syncScript) {
-    try {
-        & $syncScript -Enforce
-        Write-Host "    [OK] Atomic 24/7 Kill Switch verified and active." -ForegroundColor Green
-    } catch {
-        Write-Warning "    [!] Notice: Could not refresh firewall rules directly: $_"
+$existingRules = Get-NetFirewallRule -Group "ClaudeKillSwitch" -ErrorAction SilentlyContinue
+if (-not $existingRules) {
+    if (Test-Path $syncScript) {
+        try {
+            & $syncScript -Enforce
+            Write-Host "    [OK] Atomic 24/7 Kill Switch verified and active." -ForegroundColor Green
+        } catch {
+            Write-Warning "    [!] Notice: Could not refresh firewall rules directly: $_"
+        }
     }
+} else {
+    Write-Host "    [OK] 24/7 Kill Switch active in WFP ($(($existingRules | Measure-Object).Count) rules active)." -ForegroundColor Green
 }
 
 # 4. Detect VPN Geolocation & Timezone (with safe fallback)
@@ -151,6 +156,31 @@ if (-not $claudeExe) {
 }
 
 Write-Host "    Binary: $claudeExe" -ForegroundColor Cyan
+
+# 5.1 Verify Binary is Protected by WFP Kill Switch (handles MSIX background updates)
+$resolvedTarget = [System.IO.Path]::GetFullPath($claudeExe)
+$appFilters = Get-NetFirewallRule -Group "ClaudeKillSwitch" -ErrorAction SilentlyContinue | Get-NetFirewallApplicationFilter
+$protectedPrograms = @($appFilters | Select-Object -ExpandProperty Program -Unique | Where-Object { $_ -and $_ -ne "Any" } | ForEach-Object {
+    try { [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($_)) } catch { $_ }
+})
+
+if ($protectedPrograms -notcontains $resolvedTarget) {
+    Write-Host "[!] Claude Desktop binary is not yet covered by WFP Kill Switch rules (e.g. after an MSIX Store update)." -ForegroundColor Yellow
+    Write-Host "    Requesting Administrator privileges to update firewall rules..." -ForegroundColor Yellow
+    $p = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$syncScript`" -Enforce" -Verb RunAs -PassThru -Wait
+    
+    # Re-verify
+    $appFiltersAfter = Get-NetFirewallRule -Group "ClaudeKillSwitch" -ErrorAction SilentlyContinue | Get-NetFirewallApplicationFilter
+    $protectedAfter = @($appFiltersAfter | Select-Object -ExpandProperty Program -Unique | Where-Object { $_ -and $_ -ne "Any" } | ForEach-Object {
+        try { [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($_)) } catch { $_ }
+    })
+    
+    if ($protectedAfter -notcontains $resolvedTarget) {
+        Write-Error "[SECURITY ALERT] Failed to enforce WFP Kill Switch for Claude Desktop ($resolvedTarget)! Launch aborted to prevent real IP leak."
+        exit 1
+    }
+    Write-Host "    [OK] WFP Kill Switch rules successfully updated and verified for binary." -ForegroundColor Green
+}
 
 # Valid Chromium & Electron Anti-Telemetry / Anti-Leak Flags
 $electronFlags = @(

@@ -3,6 +3,7 @@
 *.log
 logs/*
 !logs/.gitkeep
-backups/baseline/system_baseline_created.txt
-backups/baseline/user_profile.ps1
-!/backups/**
+
+# Machine-specific baseline backups (registry keys, adapter GUIDs, firewall exports, IPs)
+backups/baseline/*
+!backups/baseline/.gitkeep
