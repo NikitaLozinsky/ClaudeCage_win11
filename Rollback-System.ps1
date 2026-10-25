@@ -143,10 +143,11 @@ Write-Host "`n[*] [6/7] Flushing DNS client cache..." -ForegroundColor Yellow
 Clear-DnsClientCache
 Write-Host "    [OK] DNS cache flushed." -ForegroundColor Green
 
-# 7. Restore ExecutionPolicy
-Write-Host "`n[*] [7/7] Restoring PowerShell ExecutionPolicy..." -ForegroundColor Yellow
+# 7. Restore ExecutionPolicy and Scheduled Tasks
+Write-Host "`n[*] [7/8] Restoring PowerShell ExecutionPolicy & Scheduled Tasks..." -ForegroundColor Yellow
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Undefined -Force -ErrorAction SilentlyContinue
-Write-Host "    [OK] ExecutionPolicy restored." -ForegroundColor Green
+Unregister-ScheduledTask -TaskName "ClaudeCage-BootSync" -Confirm:$false -ErrorAction SilentlyContinue
+Write-Host "    [OK] ExecutionPolicy restored and ClaudeCage-BootSync task removed." -ForegroundColor Green
 
 Write-Host "`n==========================================================" -ForegroundColor Green
 Write-Host "   ROLLBACK COMPLETE: System is back to v0-baseline state  " -ForegroundColor Green

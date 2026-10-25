@@ -155,8 +155,24 @@ try {
 # Set PowerShell execution policy for CurrentUser
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force -ErrorAction SilentlyContinue
 
-# 7. Verification Audit
-Write-Host "`n[*] [7/7] Running initial security & leak audit..." -ForegroundColor Yellow
+# 7. Configure Background Auto-Sync Task (Runs at Startup and Logon)
+Write-Host "`n[*] [7/8] Registering Windows Scheduled Task for 24/7 boot synchronization..." -ForegroundColor Yellow
+try {
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetRoot\Sync-ClaudeFirewall.ps1`" -Enforce"
+    $triggers = @(
+        (New-ScheduledTaskTrigger -AtStartup),
+        (New-ScheduledTaskTrigger -AtLogOn)
+    )
+    $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName "ClaudeCage-BootSync" -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Force | Out-Null
+    Write-Host "    [OK] Task 'ClaudeCage-BootSync' registered (triggers at system boot and logon)." -ForegroundColor Green
+} catch {
+    Write-Warning "    [-] Could not register boot task: $_"
+}
+
+# 8. Verification Audit
+Write-Host "`n[*] [8/8] Running initial security & leak audit..." -ForegroundColor Yellow
 if (-not $SkipTest) {
     $testScript = Join-Path $TargetRoot "Test-CageLeaks.ps1"
     if (Test-Path $testScript) {
