@@ -131,25 +131,10 @@ if (Test-Path $hookScript) {
     & $hookScript
 }
 
-# Desktop Shortcut
-try {
-    $wsh = New-Object -ComObject WScript.Shell
-    $desktopPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
-    $sc = $wsh.CreateShortcut((Join-Path $desktopPath "Claude (Secure Cage).lnk"))
-    $sc.TargetPath = "powershell.exe"
-    $sc.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$TargetRoot\Start-ClaudeDesktop.ps1`""
-    $sc.WorkingDirectory = $TargetRoot
-    $sc.Description = "Claude Desktop running in WFP Isolated Cage"
-
-    # Try icon from Claude MSIX or default
-    $iconCand = "C:\Program Files\WindowsApps\Claude_3.6556.1.0_x64__pzs8sxrjxfjjc\assets\Square44x44Logo.targetsize-48.png"
-    if (Test-Path $iconCand) {
-        $sc.IconLocation = $iconCand
-    }
-    $sc.Save()
-    Write-Host "    [OK] Created shortcut 'Claude (Secure Cage)' on Desktop." -ForegroundColor Green
-} catch {
-    Write-Warning "    [-] Could not create desktop shortcut: $_"
+# Desktop & Start Menu Shortcuts
+$shortcutScript = Join-Path $TargetRoot "Install-ClaudeShortcut.ps1"
+if (Test-Path $shortcutScript) {
+    & $shortcutScript
 }
 
 # Set PowerShell execution policy for CurrentUser
@@ -187,7 +172,7 @@ Write-Host @"
 
   HOW TO USE:
   1. Claude Desktop (GUI):
-     Double-click the 'Claude (Secure Cage)' icon on your Desktop.
+     Double-click the standard 'Claude' icon on your Desktop or Start Menu (runs securely in cage).
 
   2. Claude Code (CLI):
      Open any PowerShell terminal and type:
