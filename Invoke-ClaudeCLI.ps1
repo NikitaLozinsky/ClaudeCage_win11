@@ -3,10 +3,11 @@
     Invoke-ClaudeCLI.ps1 - Secure Anti-Fraud & Kill-Switched Launcher for Claude Code (CLI).
 .DESCRIPTION
     Wraps the Claude Code CLI inside the ClaudeCage sandbox:
-    1. Injects anti-fraud timezone ($env:TZ), locale ($env:LANG), and sets NODE_OPTIONS=--dns-result-order=ipv4first.
-    2. Prepends C:\ClaudeCage\bin to PATH so child processes use caged binaries.
-    3. Verifies that 24/7 atomic WFP Kill Switch rules are enforced for claude.exe.
-    4. Forwards all command line arguments transparently to claude.exe.
+    1. Universal VPN Auto-Detection: Prioritizes AmneziaVPN, supports any WireGuard/OpenVPN/Tailscale tunnel.
+    2. Injects anti-fraud timezone ($env:TZ), locale ($env:LANG), and sets NODE_OPTIONS=--dns-result-order=ipv4first.
+    3. Prepends C:\ClaudeCage\bin to PATH so child processes use caged binaries.
+    4. Verifies that 24/7 atomic WFP Kill Switch rules are enforced for claude.exe.
+    5. Forwards all command line arguments transparently to claude.exe.
 #>
 
 [CmdletBinding()]
@@ -21,15 +22,37 @@ $CageRoot = "C:\ClaudeCage"
 $CageBin  = Join-Path $CageRoot "bin"
 $CurlBin  = Join-Path $CageBin "curl.exe"
 
-# 1. Check AmneziaVPN Status
-$vpnAdapter = Get-NetAdapter | Where-Object {
-    ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*WireGuard*") -and $_.Status -eq "Up"
-} | Select-Object -First 1
+function Get-ActiveVpnAdapter {
+    $amnezia = Get-NetAdapter | Where-Object { 
+        ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*Amnezia*") -and $_.Status -eq "Up" 
+    } | Select-Object -First 1
+    if ($amnezia) { return $amnezia }
 
+    $vpn = Get-NetAdapter | Where-Object {
+        $_.Status -eq "Up" -and (
+            $_.InterfaceDescription -match "WireGuard|Wintun|TUN|TAP|OpenVPN|Tailscale|VPN" -or
+            $_.Name -match "VPN|WireGuard|Tailscale|TUN|TAP" -or
+            $_.InterfaceType -in @(23, 53, 131)
+        )
+    } | Select-Object -First 1
+    if ($vpn) { return $vpn }
+
+    $defRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+    if ($defRoute) {
+        $cand = Get-NetAdapter -InterfaceIndex $defRoute.InterfaceIndex -ErrorAction SilentlyContinue
+        if ($cand -and $cand.Virtual -and $cand.InterfaceDescription -notmatch "Hyper-V|VirtualBox|VMware|WSL") {
+            return $cand
+        }
+    }
+    return $null
+}
+
+# 1. Check VPN Status
+$vpnAdapter = Get-ActiveVpnAdapter
 $isVpnUp = ($vpnAdapter -ne $null)
 
 if (-not $isVpnUp) {
-    Write-Host "[!] [CLAUDECAGE OFFLINE] AmneziaVPN is not active. Running Claude CLI in offline mode (Fail-Closed)." -ForegroundColor DarkYellow
+    Write-Host "[!] [CLAUDECAGE OFFLINE] No active VPN tunnel detected. Running Claude CLI in offline mode (Fail-Closed)." -ForegroundColor DarkYellow
 }
 
 # 2. Check / Sync Kill Switch rules
@@ -74,7 +97,6 @@ foreach ($cand in $cliCandidates) {
 }
 
 if (-not $claudeCliExe) {
-    # Fallback to claude.cmd
     $cmdSource = (Get-Command claude.cmd -ErrorAction SilentlyContinue).Source
     if ($cmdSource -and (Test-Path $cmdSource)) {
         $claudeCliExe = $cmdSource

@@ -3,12 +3,12 @@
     Test-CageLeaks.ps1 - Comprehensive security & leak verification suite for ClaudeCage.
 .DESCRIPTION
     Audits and verifies:
-    1. AmneziaVPN tunnel interface status
+    1. VPN tunnel interface status (AmneziaVPN, WireGuard, OpenVPN, Tailscale, etc.)
     2. Caged binaries provisioning (node.exe, curl.exe)
     3. WFP 24/7 Kill Switch rules (LocalAddress Inversion, LAN Block, IPv6 Block, Physical Block)
-    4. NRPT (Name Resolution Policy Table) enforcement (forces Claude domains to 100.64.0.1 only)
+    4. NRPT (Name Resolution Policy Table) enforcement (forces Claude domains to tunnel DNS)
     5. Public IP & Geolocation leak check (must show VPN country, never real ISP)
-    6. WFP Fail-Closed Kill Switch (attempts egress via physical IP 192.168.0.68 - MUST FAIL)
+    6. WFP Fail-Closed Kill Switch (attempts egress via physical IP 192.168.x.x - MUST FAIL)
     7. Anti-Leak DNS Hardening (SMHNR disabled + NRPT policy active)
     8. Dual-Layer IPv6 Leak Protection (ms_tcpip6 disabled + WFP drop)
     9. Anti-Fraud Timezone & Locale Telemetry Spoofing
@@ -25,6 +25,31 @@ $CageRoot = "C:\ClaudeCage"
 $CageBin  = Join-Path $CageRoot "bin"
 $CurlBin  = Join-Path $CageBin "curl.exe"
 $NodeBin  = Join-Path $CageBin "node.exe"
+
+function Get-ActiveVpnAdapter {
+    $amnezia = Get-NetAdapter | Where-Object { 
+        ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*Amnezia*") -and $_.Status -eq "Up" 
+    } | Select-Object -First 1
+    if ($amnezia) { return $amnezia }
+
+    $vpn = Get-NetAdapter | Where-Object {
+        $_.Status -eq "Up" -and (
+            $_.InterfaceDescription -match "WireGuard|Wintun|TUN|TAP|OpenVPN|Tailscale|VPN" -or
+            $_.Name -match "VPN|WireGuard|Tailscale|TUN|TAP" -or
+            $_.InterfaceType -in @(23, 53, 131)
+        )
+    } | Select-Object -First 1
+    if ($vpn) { return $vpn }
+
+    $defRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+    if ($defRoute) {
+        $cand = Get-NetAdapter -InterfaceIndex $defRoute.InterfaceIndex -ErrorAction SilentlyContinue
+        if ($cand -and $cand.Virtual -and $cand.InterfaceDescription -notmatch "Hyper-V|VirtualBox|VMware|WSL") {
+            return $cand
+        }
+    }
+    return $null
+}
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host "      CLAUDE CAGE SECURITY & LEAK TEST SUITE (v6)         " -ForegroundColor Cyan
@@ -62,16 +87,13 @@ function Record-TestResult {
     })
 }
 
-# --- TEST 1: AmneziaVPN Interface Status ---
-$vpnAdapter = Get-NetAdapter | Where-Object {
-    ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*WireGuard*") -and $_.Status -eq "Up"
-} | Select-Object -First 1
-
+# --- TEST 1: Universal VPN Interface Status ---
+$vpnAdapter = Get-ActiveVpnAdapter
 $vpnUp = ($vpnAdapter -ne $null)
-$vpnName = if ($vpnUp) { $vpnAdapter.Name } else { "None" }
+$vpnName = if ($vpnUp) { "$($vpnAdapter.Name) [$($vpnAdapter.InterfaceDescription)]" } else { "None" }
 Record-TestResult -TestName "VPN Tunnel Interface Active" `
     -Passed $vpnUp `
-    -Expected "AmneziaVPN interface Up" `
+    -Expected "VPN tunnel interface Up" `
     -Actual "Adapter: $vpnName, Status: $(if ($vpnUp) { 'Up' } else { 'Down' })"
 
 # --- TEST 2: Caged Binaries Provisioning ---
@@ -87,7 +109,7 @@ $ruleCount = ($killSwitchRules | Measure-Object).Count
 $rulesActive = ($ruleCount -gt 0)
 Record-TestResult -TestName "WFP 24/7 KillSwitch Rules Active" `
     -Passed $rulesActive `
-    -Expected "ClaudeKillSwitch rules > 0 (44 active rules)" `
+    -Expected "ClaudeKillSwitch rules > 0" `
     -Actual "$ruleCount active rules"
 
 # --- TEST 4: NRPT Kernel DNS Policy Enforcement ---
@@ -95,12 +117,12 @@ $nrptRules = Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object 
 $nrptPassed = $false
 $nrptActual = "No ClaudeCage NRPT rules found"
 if ($nrptRules) {
-    $nrptPassed = ($nrptRules.NameServers -contains "100.64.0.1")
-    $nrptActual = "NRPT active: $($nrptRules.Namespace -join ', ') -> 100.64.0.1"
+    $nrptPassed = ($nrptRules.NameServers.Count -gt 0)
+    $nrptActual = "NRPT active: $($nrptRules.Namespace -join ', ') -> $($nrptRules.NameServers -join ', ')"
 }
 Record-TestResult -TestName "NRPT Kernel DNS Policy (svchost Protection)" `
     -Passed $nrptPassed `
-    -Expected "Claude domains locked to 100.64.0.1 in NRPT" `
+    -Expected "Claude domains locked to tunnel DNS in NRPT" `
     -Actual $nrptActual
 
 # --- TEST 5: Public IP Geolocation (Must NOT be Russia) ---

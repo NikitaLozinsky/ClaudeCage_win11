@@ -3,12 +3,13 @@
     Start-ClaudeDesktop.ps1 - Secure Anti-Fraud & Kill-Switched Launcher for Claude Desktop.
 .DESCRIPTION
     Launches Claude Desktop (Electron) inside the ClaudeCage sandbox:
-    1. Terminates any lingering/minimized Claude processes in the tray to guarantee clean
+    1. Universal VPN Auto-Detection: Prioritizes AmneziaVPN, supports any WireGuard/OpenVPN/Tailscale tunnel.
+    2. Terminates any lingering/minimized Claude processes in the tray to guarantee clean
        injection of anti-fraud environment variables (TZ, LANG, LC_ALL).
-    2. Syncs 24/7 atomic WFP Kill Switch firewall rules via Sync-ClaudeFirewall.ps1.
-    3. Resolves VPN exit node timezone and injects anti-fraud environment.
-    4. Injects valid Chromium anti-telemetry & anti-WebRTC-leak flags into the runtime.
-    5. Prepends C:\ClaudeCage\bin to PATH so MCP servers/child processes inherit caged binaries.
+    3. Syncs 24/7 atomic WFP Kill Switch firewall rules via Sync-ClaudeFirewall.ps1.
+    4. Resolves VPN exit node timezone and injects anti-fraud environment.
+    5. Injects valid Chromium anti-telemetry & anti-WebRTC-leak flags into the runtime.
+    6. Prepends C:\ClaudeCage\bin to PATH so MCP servers/child processes inherit caged binaries.
 #>
 
 [CmdletBinding()]
@@ -21,6 +22,31 @@ $ErrorActionPreference = 'Stop'
 $CageRoot = "C:\ClaudeCage"
 $CageBin  = Join-Path $CageRoot "bin"
 $CurlBin  = Join-Path $CageBin "curl.exe"
+
+function Get-ActiveVpnAdapter {
+    $amnezia = Get-NetAdapter | Where-Object { 
+        ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*Amnezia*") -and $_.Status -eq "Up" 
+    } | Select-Object -First 1
+    if ($amnezia) { return $amnezia }
+
+    $vpn = Get-NetAdapter | Where-Object {
+        $_.Status -eq "Up" -and (
+            $_.InterfaceDescription -match "WireGuard|Wintun|TUN|TAP|OpenVPN|Tailscale|VPN" -or
+            $_.Name -match "VPN|WireGuard|Tailscale|TUN|TAP" -or
+            $_.InterfaceType -in @(23, 53, 131)
+        )
+    } | Select-Object -First 1
+    if ($vpn) { return $vpn }
+
+    $defRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+    if ($defRoute) {
+        $cand = Get-NetAdapter -InterfaceIndex $defRoute.InterfaceIndex -ErrorAction SilentlyContinue
+        if ($cand -and $cand.Virtual -and $cand.InterfaceDescription -notmatch "Hyper-V|VirtualBox|VMware|WSL") {
+            return $cand
+        }
+    }
+    return $null
+}
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host "         CLAUDE CAGE: LAUNCHING CLAUDE DESKTOP            " -ForegroundColor Cyan
@@ -38,18 +64,15 @@ if ($staleProcs) {
     Write-Host "    [OK] No stale Claude processes found." -ForegroundColor Gray
 }
 
-# 2. Check AmneziaVPN Status
-Write-Host "`n[*] [2/5] Checking AmneziaVPN tunnel status..." -ForegroundColor Yellow
-$vpnAdapter = Get-NetAdapter | Where-Object {
-    ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*WireGuard*") -and $_.Status -eq "Up"
-} | Select-Object -First 1
-
+# 2. Check VPN Status (Amnezia or generic VPN)
+Write-Host "`n[*] [2/5] Checking VPN tunnel status..." -ForegroundColor Yellow
+$vpnAdapter = Get-ActiveVpnAdapter
 $isVpnUp = ($vpnAdapter -ne $null)
 
 if ($isVpnUp) {
-    Write-Host "    [OK] AmneziaVPN is UP (Interface: $($vpnAdapter.Name))." -ForegroundColor Green
+    Write-Host "    [OK] VPN Tunnel is UP (Interface: $($vpnAdapter.Name) [$($vpnAdapter.InterfaceDescription)])." -ForegroundColor Green
 } else {
-    Write-Host "    [!] [OFFLINE MODE] AmneziaVPN is NOT active." -ForegroundColor Yellow
+    Write-Host "    [!] [OFFLINE MODE] No active VPN tunnel detected." -ForegroundColor Yellow
     Write-Host "        Claude Desktop will launch in OFFLINE mode (Fail-Closed)." -ForegroundColor Yellow
     Write-Host "        24/7 LocalAddress Inversion prevents any egress via physical adapters.`n" -ForegroundColor DarkYellow
 }
@@ -100,7 +123,6 @@ Write-Host "`n[*] [5/5] Locating Claude Desktop and preparing valid Chromium fla
 
 $claudeExe = $null
 
-# Check AppX package location
 $appx = Get-AppxPackage -Name *Claude* -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($appx) {
     $cand = Join-Path $appx.InstallLocation "app\claude.exe"
@@ -132,15 +154,10 @@ Write-Host "    Binary: $claudeExe" -ForegroundColor Cyan
 
 # Valid Chromium & Electron Anti-Telemetry / Anti-Leak Flags
 $electronFlags = @(
-    # WebRTC leak protection (verified Chromium flags)
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--enforce-webrtc-ip-permission-check",
-
-    # Locale & Language spoofing
     "--lang=en-US",
     "--accept-lang=en-US,en",
-
-    # DNS & Network isolation flags
     "--disable-features=AsyncDns,DnsOverHttpsUpgrade,WebRtcHideLocalIpsWithMdns",
     "--disable-background-networking"
 )

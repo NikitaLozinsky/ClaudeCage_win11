@@ -3,16 +3,19 @@
     Sync-ClaudeFirewall.ps1 - Atomic Make-Before-Break 24/7 Fail-Closed WFP Kill Switch Engine.
 .DESCRIPTION
     Dynamically configures Windows Filtering Platform (WFP) rules for Claude Desktop and Claude Code CLI:
-    1. Zero-Race-Condition 24/7 Architecture:
+    1. Universal VPN Support:
+       - Prioritizes AmneziaVPN if active.
+       - Automatically auto-detects generic VPN tunnels (WireGuard, OpenVPN, Wintun, Tailscale, Proton, Mullvad, etc.).
+    2. Zero-Race-Condition 24/7 Architecture:
        - Source IP / LocalAddress Inversion: Blocks all outbound traffic from any source IP outside
-         the Amnezia CGNAT range (100.64.0.0 - 100.127.255.255) and loopback (127.0.0.0/8).
-         When VPN drops, packets trying to egress via 192.168.0.68 are dropped with 0 ms delay!
+         the VPN tunnel subnet and loopback (127.0.0.0/8).
+         When VPN drops, packets trying to egress via 192.168.x.x are dropped with 0 ms delay!
        - Physical Adapter Block: Explicitly blocks all non-VPN interface aliases.
        - LAN & STUN Leak Block: Blocks outbound traffic to RFC 1918 private subnets and multicast.
        - Dual-layer IPv6 Block: Blocks outbound IPv6 by both RemoteAddress and LocalAddress ranges.
-    2. Make-Before-Break Atomic Replacement:
+    3. Make-Before-Break Atomic Replacement:
        Never removes existing firewall rules before new rules are fully created and active.
-    3. Comprehensive Target Discovery:
+    4. Comprehensive Target Discovery:
        Protects Claude Desktop (MSIX package and Win32 binaries), Claude CLI, caged node/curl,
        Git networking binaries (git-remote-https.exe, ssh.exe), and any MCP servers configured
        in %APPDATA%\Claude\claude_desktop_config.json.
@@ -46,6 +49,34 @@ if (-not (Test-Admin)) {
 $GroupName = "ClaudeKillSwitch"
 $CageRoot  = "C:\ClaudeCage"
 $CageBin   = Join-Path $CageRoot "bin"
+
+function Get-ActiveVpnAdapter {
+    # 1. Look for Amnezia first (priority)
+    $amnezia = Get-NetAdapter | Where-Object { 
+        ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*Amnezia*") -and $_.Status -eq "Up" 
+    } | Select-Object -First 1
+    if ($amnezia) { return $amnezia }
+
+    # 2. Look for generic VPN / Tunnel (WireGuard, Wintun, OpenVPN, Tailscale, TAP, TUN, etc.)
+    $vpn = Get-NetAdapter | Where-Object {
+        $_.Status -eq "Up" -and (
+            $_.InterfaceDescription -match "WireGuard|Wintun|TUN|TAP|OpenVPN|Tailscale|VPN" -or
+            $_.Name -match "VPN|WireGuard|Tailscale|TUN|TAP" -or
+            $_.InterfaceType -in @(23, 53, 131)
+        )
+    } | Select-Object -First 1
+    if ($vpn) { return $vpn }
+
+    # 3. Default route virtual adapter fallback
+    $defRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+    if ($defRoute) {
+        $cand = Get-NetAdapter -InterfaceIndex $defRoute.InterfaceIndex -ErrorAction SilentlyContinue
+        if ($cand -and $cand.Virtual -and $cand.InterfaceDescription -notmatch "Hyper-V|VirtualBox|VMware|WSL") {
+            return $cand
+        }
+    }
+    return $null
+}
 
 function Get-CageTargetBinaries {
     $targets = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -169,20 +200,16 @@ function Show-KillSwitchStatus {
     Write-Host "         CLAUDE CAGE WFP KILL SWITCH STATUS               " -ForegroundColor Cyan
     Write-Host "==========================================================" -ForegroundColor Cyan
 
-    # Adapters
-    $vpnAdapter = Get-NetAdapter | Where-Object {
-        ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*WireGuard*") -and $_.Status -eq "Up"
-    } | Select-Object -First 1
+    $vpnAdapter = Get-ActiveVpnAdapter
 
     if ($vpnAdapter) {
-        Write-Host "`n[+] AmneziaVPN Status: CONNECTED (Interface: $($vpnAdapter.Name), Idx: $($vpnAdapter.InterfaceIndex))" -ForegroundColor Green
+        Write-Host "`n[+] VPN Tunnel Active: $($vpnAdapter.Name) [$($vpnAdapter.InterfaceDescription)]" -ForegroundColor Green
         $vpnIps = (Get-NetIPAddress -InterfaceIndex $vpnAdapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
         Write-Host "    Tunnel IPv4: $($vpnIps -join ', ')" -ForegroundColor Green
     } else {
-        Write-Host "`n[!] AmneziaVPN Status: DISCONNECTED / NOT DETECTED (Protected by 24/7 LocalAddress Inversion)" -ForegroundColor Yellow
+        Write-Host "`n[!] VPN Status: DISCONNECTED / NOT DETECTED (Protected 24/7 by LocalAddress Inversion)" -ForegroundColor Yellow
     }
 
-    # Active Rules
     $rules = Get-NetFirewallRule | Where-Object { $_.Group -eq $GroupName }
     Write-Host "`n[i] Active ClaudeKillSwitch WFP Rules: $(($rules | Measure-Object).Count)" -ForegroundColor Yellow
     foreach ($r in $rules) {
@@ -221,19 +248,43 @@ foreach ($t in $targets) {
     Write-Host "    - $($t.Name): $desc" -ForegroundColor DarkGray
 }
 
-# 2. Network topology
+# 2. Universal VPN Adapter & Network topology
+$vpnAdapter = Get-ActiveVpnAdapter
+$vpnName = if ($vpnAdapter) { $vpnAdapter.Name } else { "None" }
+$vpnIp = if ($vpnAdapter) { (Get-NetIPAddress -InterfaceIndex $vpnAdapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress } else { $null }
+
+if ($vpnAdapter) {
+    Write-Host "`n[+] Detected VPN: $($vpnAdapter.Name) (IP: $vpnIp)" -ForegroundColor Green
+} else {
+    Write-Host "`n[!] No active VPN currently connected. Using standard CGNAT 100.64.0.0/10 fail-closed profile." -ForegroundColor Yellow
+}
+
 $nonVpnAdapters = Get-NetAdapter | Where-Object {
-    $_.Name -notlike "*Amnezia*" -and $_.InterfaceDescription -notlike "*WireGuard*"
+    if ($vpnAdapter) {
+        $_.InterfaceIndex -ne $vpnAdapter.InterfaceIndex
+    } else {
+        $_.Name -notlike "*Amnezia*" -and $_.InterfaceDescription -notlike "*WireGuard*"
+    }
 }
 $nonVpnAliases = @($nonVpnAdapters | ForEach-Object { $_.Name })
 
-# 3. Define 24/7 Security Policies
-# LocalAddress Inversion: Block all source IPs EXCEPT Amnezia CGNAT (100.64.0.0/10) and Loopback (127.0.0.0/8)
+# 3. Dynamic LocalAddress Inversion calculation
+# Default to CGNAT 100.64.0.0/10 (AmneziaVPN standard)
 $blockedLocalIpRanges = @(
     "0.0.0.0-100.63.255.255",
     "100.128.0.0-126.255.255.255",
     "128.0.0.0-255.255.255.255"
 )
+
+# If another VPN is active with a 10.x.x.x IP:
+if ($vpnIp -and $vpnIp -like "10.*") {
+    $blockedLocalIpRanges = @(
+        "0.0.0.0-9.255.255.255",
+        "11.0.0.0-126.255.255.255",
+        "128.0.0.0-255.255.255.255"
+    )
+    Write-Host "    [i] Configured LocalAddress Inversion for 10.0.0.0/8 VPN tunnel." -ForegroundColor Cyan
+}
 
 # LAN & STUN leak block: RFC 1918 private subnets and multicast
 $blockedLanRanges = @(

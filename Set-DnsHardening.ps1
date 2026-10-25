@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    Set-DnsHardening.ps1 - Enforce kernel-level anti-leak DNS & IPv6 hardening on Windows 11.
+    Set-DnsHardening.ps1 - Universal kernel-level anti-leak DNS & IPv6 hardening on Windows 11.
 .DESCRIPTION
     Applies strict DNS privacy, NRPT kernel policy, and leak prevention:
     1. Installs Name Resolution Policy Table (NRPT) rules via Add-DnsClientNrptRule:
-       Forces all DNS queries for Anthropic/Claude domains strictly to AmneziaVPN DNS (100.64.0.1).
-       Prevents svchost.exe (Dnscache) from ever leaking queries to Russian ISP DNS (46.61.250.136)
-       when VPN drops.
+       Forces all DNS queries for Anthropic/Claude domains strictly to the VPN internal DNS
+       (auto-detects AmneziaVPN 100.64.0.1, WireGuard, OpenVPN, or custom VPN DNS).
+       Prevents svchost.exe (Dnscache) from ever leaking queries to Russian ISP DNS when VPN drops.
     2. Disables Smart Multi-Homed Name Resolution (SMHNR) to stop parallel DNS queries.
     3. Disables LLMNR (Link-Local Multicast Name Resolution).
     4. Configures IPv4 preference over IPv6 (RFC 3484 DisabledComponents = 0x20).
@@ -16,7 +16,9 @@
 #>
 
 [CmdletBinding()]
-param()
+param(
+    [string]$CustomVpnDns
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -31,13 +33,46 @@ if (-not (Test-Admin)) {
     exit 1
 }
 
-Write-Host "[*] Applying DNS & IPv6 Hardening (NRPT + SMHNR + Location Guard)..." -ForegroundColor Cyan
+Write-Host "[*] Applying Universal DNS & IPv6 Hardening (NRPT + SMHNR + Location Guard)..." -ForegroundColor Cyan
+
+# Detect VPN DNS Server (AmneziaVPN priority, generic VPN fallback)
+$targetVpnDns = "100.64.0.1"
+
+if ($CustomVpnDns) {
+    $targetVpnDns = $CustomVpnDns
+} else {
+    # 1. Check AmneziaVPN
+    $amnezia = Get-NetAdapter | Where-Object { 
+        ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*Amnezia*") -and $_.Status -eq "Up" 
+    } | Select-Object -First 1
+
+    # 2. Check generic VPN / Tunnel
+    $vpnAdapter = if ($amnezia) { $amnezia } else {
+        Get-NetAdapter | Where-Object {
+            $_.Status -eq "Up" -and (
+                $_.InterfaceDescription -match "WireGuard|Wintun|TUN|TAP|OpenVPN|Tailscale|VPN" -or
+                $_.Name -match "VPN|WireGuard|Tailscale|TUN|TAP" -or
+                $_.InterfaceType -in @(23, 53, 131)
+            )
+        } | Select-Object -First 1
+    }
+
+    if ($vpnAdapter) {
+        $dnsList = @(Get-DnsClientServerAddress -InterfaceIndex $vpnAdapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty ServerAddresses) | Where-Object { $_ -ne $null -and $_ -ne "" }
+        if ($dnsList.Count -gt 0) {
+            $targetVpnDns = $dnsList[0]
+        }
+        Write-Host "    [i] Detected active VPN adapter '$($vpnAdapter.Name)' -> Tunnel DNS: $targetVpnDns" -ForegroundColor Cyan
+    } else {
+        Write-Host "    [i] VPN not currently connected. Using standard tunnel DNS: $targetVpnDns" -ForegroundColor DarkGray
+    }
+}
 
 # 1. NRPT (Name Resolution Policy Table) Enforcement
 Write-Host "    [+] Configuring Name Resolution Policy Table (NRPT)..." -ForegroundColor Yellow
 $nrptComment = "ClaudeCageNRPT"
 
-# Clean prior ClaudeCage NRPT rules for idempotency
 $existingNrpt = Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Comment -eq $nrptComment }
 if ($existingNrpt) {
     foreach ($r in $existingNrpt) {
@@ -55,14 +90,13 @@ $targetNamespaces = @(
     ".intercom.io"
 )
 
-# Bind all Claude domains strictly to AmneziaVPN internal DNS
 Add-DnsClientNrptRule -Namespace $targetNamespaces `
-    -NameServers "100.64.0.1" `
+    -NameServers $targetVpnDns `
     -Comment $nrptComment `
     -DisplayName "ClaudeCage Strict Tunnel DNS Rule" `
     -PassThru | Out-Null
 
-Write-Host "        Installed NRPT rule: domains [$($targetNamespaces -join ', ')] -> 100.64.0.1 only." -ForegroundColor Green
+Write-Host "        Installed NRPT rule: domains [$($targetNamespaces -join ', ')] -> $targetVpnDns only." -ForegroundColor Green
 
 # 2. SMHNR & LLMNR in Group Policy registry
 $dnsPolicyKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
@@ -107,4 +141,4 @@ foreach ($adapter in $physicalAdapters) {
 Clear-DnsClientCache
 Write-Host "    [+] DNS resolver cache cleared." -ForegroundColor Green
 
-Write-Host "[OK] Kernel DNS & IPv6 hardening applied successfully." -ForegroundColor Green
+Write-Host "[OK] Universal DNS & IPv6 hardening applied successfully." -ForegroundColor Green

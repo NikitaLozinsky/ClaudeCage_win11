@@ -1,14 +1,14 @@
 <#
 .SYNOPSIS
-    Watch-ClaudeCage.ps1 - Real-time Logger & Telemetry Monitor for ClaudeCage (ClaudeCell).
+    Watch-ClaudeCage.ps1 - Real-time Universal Telemetry & Socket Logger for ClaudeCage.
 .DESCRIPTION
     Continuously audits and logs:
-    1. AmneziaVPN connection state and interface status transitions.
+    1. VPN tunnel connection state and transitions (AmneziaVPN, WireGuard, OpenVPN, Tailscale, etc.).
     2. Claude Desktop and Claude Code CLI processes (PIDs, memory, lifetime).
     3. Active TCP/UDP sockets owned by Claude processes via Get-NetTCPConnection:
-       - Sockets routed through AmneziaVPN (VERDICT: ALLOWED VIA TUNNEL)
-       - Sockets routed through physical adapter / Ethernet (VERDICT: BLOCKED BY WFP / DROP)
-       - Local loopback connections / MCP servers (VERDICT: LOCAL IPC)
+       - Sockets routed through VPN tunnel (VERDICT: ALLOWED VIA VPN)
+       - Sockets routed through physical adapter / Ethernet (VERDICT: BLOCKED BY WFP DROP)
+       - Local loopback connections / MCP servers (VERDICT: LOCAL IPC / MCP)
     4. Writes structured logs to C:\ClaudeCage\logs\cage_traffic.log
     5. Writes live metrics to C:\ClaudeCage\logs\cage_metrics.json
     6. Displays an interactive terminal dashboard.
@@ -32,6 +32,31 @@ if (-not (Test-Path $LogsDir)) {
     New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
 }
 
+function Get-ActiveVpnAdapter {
+    $amnezia = Get-NetAdapter | Where-Object { 
+        ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*Amnezia*") -and $_.Status -eq "Up" 
+    } | Select-Object -First 1
+    if ($amnezia) { return $amnezia }
+
+    $vpn = Get-NetAdapter | Where-Object {
+        $_.Status -eq "Up" -and (
+            $_.InterfaceDescription -match "WireGuard|Wintun|TUN|TAP|OpenVPN|Tailscale|VPN" -or
+            $_.Name -match "VPN|WireGuard|Tailscale|TUN|TAP" -or
+            $_.InterfaceType -in @(23, 53, 131)
+        )
+    } | Select-Object -First 1
+    if ($vpn) { return $vpn }
+
+    $defRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+    if ($defRoute) {
+        $cand = Get-NetAdapter -InterfaceIndex $defRoute.InterfaceIndex -ErrorAction SilentlyContinue
+        if ($cand -and $cand.Virtual -and $cand.InterfaceDescription -notmatch "Hyper-V|VirtualBox|VMware|WSL") {
+            return $cand
+        }
+    }
+    return $null
+}
+
 function Write-CageLog {
     param(
         [string]$Level,
@@ -44,7 +69,7 @@ function Write-CageLog {
     Write-Host $line -ForegroundColor $Color
 }
 
-Write-CageLog "INIT" "Starting ClaudeCage Telemetry & Socket Logger..." Cyan
+Write-CageLog "INIT" "Starting ClaudeCage Universal Telemetry & Socket Logger..." Cyan
 
 $metrics = [ordered]@{
     StartTime             = [DateTime]::UtcNow.ToString("o")
@@ -73,11 +98,8 @@ try {
         $metrics.TotalChecks++
         $metrics.LastUpdate = [DateTime]::UtcNow.ToString("o")
 
-        # 1. Inspect Network Adapters
-        $vpnAdapter = Get-NetAdapter | Where-Object {
-            ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*WireGuard*") -and $_.Status -eq "Up"
-        } | Select-Object -First 1
-
+        # 1. Inspect Network Adapters (Universal VPN check)
+        $vpnAdapter = Get-ActiveVpnAdapter
         $currentVpnState = if ($vpnAdapter) { "CONNECTED" } else { "DISCONNECTED" }
         $metrics.VpnState = $currentVpnState
 
@@ -97,11 +119,11 @@ try {
             $metrics.PhysicalIp = if ($physIpObj) { $physIpObj } else { "Unknown" }
         }
 
-        # Detect State Transitions
+        # Detect State Transitions (Protected 24/7 by LocalAddress Inversion, no reload churn needed)
         if ($previousVpnState -ne $null -and $previousVpnState -ne $currentVpnState) {
             $metrics.VpnTransitions++
             $color = if ($currentVpnState -eq "CONNECTED") { [ConsoleColor]::Green } else { [ConsoleColor]::Red }
-            Write-CageLog "TRANSITION" "VPN State changed: $previousVpnState -> $currentVpnState (Interface: $($metrics.VpnInterface)) [Protected by 24/7 LocalAddress Inversion]" $color
+            Write-CageLog "TRANSITION" "VPN State changed: $previousVpnState -> $currentVpnState (Interface: $($metrics.VpnInterface)) [Protected 24/7 by LocalAddress Inversion]" $color
         }
         $previousVpnState = $currentVpnState
 
@@ -134,7 +156,6 @@ try {
                 $connId = "$($conn.OwningProcess):$($conn.LocalAddress):$($conn.LocalPort)->$($conn.RemoteAddress):$($conn.RemotePort)-$($conn.State)"
                 $metrics.TotalSocketsAudited++
 
-                # Determine routing and verdict
                 $localIp  = $conn.LocalAddress
                 $remoteIp = $conn.RemoteAddress
                 $state    = $conn.State
@@ -148,12 +169,12 @@ try {
                         Write-CageLog "IPC" "$procDesc Local socket: ${localIp}:$($conn.LocalPort) <-> ${remoteIp}:$($conn.RemotePort) ($state) [VERDICT: LOCAL IPC / MCP]" DarkCyan
                     }
                 }
-                # B. Tunneled via AmneziaVPN
+                # B. Tunneled via VPN
                 elseif ($localIp -eq $metrics.VpnIp -or ($vpnAdapter -and $conn.InterfaceIndex -eq $vpnAdapter.InterfaceIndex)) {
                     if (-not $seenConnections.Contains($connId)) {
                         $seenConnections.Add($connId) | Out-Null
                         $metrics.ConnectionsAllowedVpn++
-                        Write-CageLog "TUNNEL" "$procDesc Egress: ${localIp}:$($conn.LocalPort) -> ${remoteIp}:$($conn.RemotePort) ($state) [VERDICT: ALLOWED VIA AMNEZIAVPN]" Green
+                        Write-CageLog "TUNNEL" "$procDesc Egress: ${localIp}:$($conn.LocalPort) -> ${remoteIp}:$($conn.RemotePort) ($state) [VERDICT: ALLOWED VIA VPN]" Green
                     }
                 }
                 # C. Routed to Physical Adapter (WFP Kill Switch Engagement)
@@ -165,7 +186,7 @@ try {
                         Write-CageLog "KILLSWITCH" "$procDesc Egress attempted via physical IP ${localIp} -> ${remoteIp}:$($conn.RemotePort) ($state) [VERDICT: BLOCKED BY WFP DROP]" Red
                     }
                 }
-                # D. Other local addresses (e.g. 0.0.0.0 listener)
+                # D. Other local addresses
                 else {
                     if (-not $seenConnections.Contains($connId)) {
                         $seenConnections.Add($connId) | Out-Null
