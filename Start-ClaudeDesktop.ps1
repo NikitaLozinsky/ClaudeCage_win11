@@ -3,10 +3,11 @@
     Start-ClaudeDesktop.ps1 - Secure Anti-Fraud & Kill-Switched Launcher for Claude Desktop.
 .DESCRIPTION
     Launches Claude Desktop (Electron) inside the ClaudeCage sandbox:
-    1. Verifies AmneziaVPN connection status. Refuses to start if VPN is down (Fail-Closed).
-    2. Syncs WFP Kill Switch firewall rules via Sync-ClaudeFirewall.ps1.
-    3. Resolves VPN exit node timezone and injects anti-fraud environment (TZ, LANG, LC_ALL).
-    4. Injects strict anti-telemetry & anti-WebRTC-leak flags into the Chromium/Electron runtime.
+    1. Terminates any lingering/minimized Claude processes in the tray to guarantee clean
+       injection of anti-fraud environment variables (TZ, LANG, LC_ALL).
+    2. Syncs 24/7 atomic WFP Kill Switch firewall rules via Sync-ClaudeFirewall.ps1.
+    3. Resolves VPN exit node timezone and injects anti-fraud environment.
+    4. Injects valid Chromium anti-telemetry & anti-WebRTC-leak flags into the runtime.
     5. Prepends C:\ClaudeCage\bin to PATH so MCP servers/child processes inherit caged binaries.
 #>
 
@@ -25,8 +26,20 @@ Write-Host "==========================================================" -Foregro
 Write-Host "         CLAUDE CAGE: LAUNCHING CLAUDE DESKTOP            " -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-# 1. Check AmneziaVPN Status
-Write-Host "[*] [1/5] Checking AmneziaVPN tunnel status..." -ForegroundColor Yellow
+# 1. Terminate any existing background / tray Claude processes
+Write-Host "[*] [1/5] Terminating any stale background/tray Claude processes..." -ForegroundColor Yellow
+$staleProcs = Get-Process -Name "*claude*" -ErrorAction SilentlyContinue
+if ($staleProcs) {
+    Write-Host "    Found $(($staleProcs | Measure-Object).Count) running Claude process(es). Terminating for clean environment..." -ForegroundColor DarkYellow
+    $staleProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 600
+    Write-Host "    [OK] Stale processes terminated." -ForegroundColor Green
+} else {
+    Write-Host "    [OK] No stale Claude processes found." -ForegroundColor Gray
+}
+
+# 2. Check AmneziaVPN Status
+Write-Host "`n[*] [2/5] Checking AmneziaVPN tunnel status..." -ForegroundColor Yellow
 $vpnAdapter = Get-NetAdapter | Where-Object {
     ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*WireGuard*") -and $_.Status -eq "Up"
 } | Select-Object -First 1
@@ -36,25 +49,25 @@ $isVpnUp = ($vpnAdapter -ne $null)
 if ($isVpnUp) {
     Write-Host "    [OK] AmneziaVPN is UP (Interface: $($vpnAdapter.Name))." -ForegroundColor Green
 } else {
-    Write-Host "`n[!] [OFFLINE MODE] AmneziaVPN is NOT connected or tunnel is down!" -ForegroundColor DarkYellow
-    Write-Host "    Claude Desktop will launch in OFFLINE mode (Fail-Closed)." -ForegroundColor Yellow
-    Write-Host "    WFP Kill Switch prevents all egress via physical adapters; to Claude, internet is unavailable.`n" -ForegroundColor DarkYellow
+    Write-Host "    [!] [OFFLINE MODE] AmneziaVPN is NOT active." -ForegroundColor Yellow
+    Write-Host "        Claude Desktop will launch in OFFLINE mode (Fail-Closed)." -ForegroundColor Yellow
+    Write-Host "        24/7 LocalAddress Inversion prevents any egress via physical adapters.`n" -ForegroundColor DarkYellow
 }
 
-# 2. Sync / Verify WFP Kill Switch Rules
-Write-Host "[*] [2/5] Verifying WFP Fail-Closed Kill Switch rules..." -ForegroundColor Yellow
+# 3. Sync / Verify WFP Kill Switch Rules
+Write-Host "[*] [3/5] Verifying 24/7 WFP Fail-Closed Kill Switch rules..." -ForegroundColor Yellow
 $syncScript = Join-Path $CageRoot "Sync-ClaudeFirewall.ps1"
 if (Test-Path $syncScript) {
     try {
         & $syncScript -Enforce
-        Write-Host "    [OK] Kill Switch rules verified and active." -ForegroundColor Green
+        Write-Host "    [OK] Atomic 24/7 Kill Switch verified and active." -ForegroundColor Green
     } catch {
-        Write-Warning "    [!] Notice: Could not refresh firewall rules directly (may require admin): $_"
+        Write-Warning "    [!] Notice: Could not refresh firewall rules directly: $_"
     }
 }
 
-# 3. Detect VPN Geolocation & Timezone (with safe fallback)
-Write-Host "`n[*] [3/5] Resolving timezone & anti-fraud telemetry..." -ForegroundColor Yellow
+# 4. Detect VPN Geolocation & Timezone (with safe fallback)
+Write-Host "`n[*] [4/5] Resolving timezone & anti-fraud telemetry..." -ForegroundColor Yellow
 $vpnTz = "Europe/Amsterdam"
 $vpnCountry = "NL"
 $vpnIp = "Offline / Protected"
@@ -75,16 +88,15 @@ Write-Host "    VPN Exit IP:       $vpnIp" -ForegroundColor Cyan
 Write-Host "    Exit Country:      $vpnCountry" -ForegroundColor Cyan
 Write-Host "    Spoofed Timezone:  $vpnTz" -ForegroundColor Cyan
 
-# 4. Inject Anti-Fraud Environment Variables
-Write-Host "`n[*] [4/5] Injecting anti-fraud environment parameters..." -ForegroundColor Yellow
+# Inject Anti-Fraud Environment Variables
 $env:TZ = $vpnTz
 $env:LANG = "en_US.UTF-8"
 $env:LC_ALL = "en_US.UTF-8"
 $env:ELECTRON_ENABLE_LOGGING = "false"
 $env:PATH = "$CageBin;$env:PATH"
 
-# 5. Locate Claude Desktop Binary & Prepare Flags
-Write-Host "`n[*] [5/5] Locating Claude Desktop and preparing Chromium flags..." -ForegroundColor Yellow
+# 5. Locate Claude Desktop Binary & Prepare Valid Chromium Flags
+Write-Host "`n[*] [5/5] Locating Claude Desktop and preparing valid Chromium flags..." -ForegroundColor Yellow
 
 $claudeExe = $null
 
@@ -118,19 +130,18 @@ if (-not $claudeExe) {
 
 Write-Host "    Binary: $claudeExe" -ForegroundColor Cyan
 
-# Anti-Fraud & Anti-Leak Electron Flags
+# Valid Chromium & Electron Anti-Telemetry / Anti-Leak Flags
 $electronFlags = @(
-    # WebRTC leak protection
+    # WebRTC leak protection (verified Chromium flags)
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-    "--disable-webrtc",
     "--enforce-webrtc-ip-permission-check",
 
     # Locale & Language spoofing
     "--lang=en-US",
-    "--accept-lang=en-US,en;q=0.9",
+    "--accept-lang=en-US,en",
 
     # DNS & Network isolation flags
-    "--disable-features=SmartMultiHomedResolution,WebRtcHideLocalIpsWithMdns",
+    "--disable-features=AsyncDns,DnsOverHttpsUpgrade,WebRtcHideLocalIpsWithMdns",
     "--disable-background-networking"
 )
 

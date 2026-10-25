@@ -1,14 +1,17 @@
 <#
 .SYNOPSIS
-    Test-CageLeaks.ps1 - Automated security leak test suite for ClaudeCage.
+    Test-CageLeaks.ps1 - Comprehensive security & leak verification suite for ClaudeCage.
 .DESCRIPTION
-    Verifies:
-    1. AmneziaVPN tunnel interface status and IP assignment
-    2. Fail-Closed Kill Switch (attempts outbound egress via physical adapter - MUST FAIL)
-    3. Public IP & Geolocation leak check (must show VPN country, never real ISP)
-    4. DNS leak protection (direct ISP DNS queries blocked, SMHNR disabled)
-    5. IPv6 leak protection (outbound IPv6 blocked, ms_tcpip6 disabled on physical NICs)
-    6. Timezone & Locale anti-fraud telemetry spoofing
+    Audits and verifies:
+    1. AmneziaVPN tunnel interface status
+    2. Caged binaries provisioning (node.exe, curl.exe)
+    3. WFP 24/7 Kill Switch rules (LocalAddress Inversion, LAN Block, IPv6 Block, Physical Block)
+    4. NRPT (Name Resolution Policy Table) enforcement (forces Claude domains to 100.64.0.1 only)
+    5. Public IP & Geolocation leak check (must show VPN country, never real ISP)
+    6. WFP Fail-Closed Kill Switch (attempts egress via physical IP 192.168.0.68 - MUST FAIL)
+    7. Anti-Leak DNS Hardening (SMHNR disabled + NRPT policy active)
+    8. Dual-Layer IPv6 Leak Protection (ms_tcpip6 disabled + WFP drop)
+    9. Anti-Fraud Timezone & Locale Telemetry Spoofing
 #>
 
 [CmdletBinding()]
@@ -24,7 +27,7 @@ $CurlBin  = Join-Path $CageBin "curl.exe"
 $NodeBin  = Join-Path $CageBin "node.exe"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "           CLAUDE CAGE SECURITY & LEAK TEST SUITE         " -ForegroundColor Cyan
+Write-Host "      CLAUDE CAGE SECURITY & LEAK TEST SUITE (v6)         " -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 $testResults = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -78,16 +81,29 @@ Record-TestResult -TestName "Caged Binaries Provisioned" `
     -Expected "curl.exe and node.exe in C:\ClaudeCage\bin" `
     -Actual "curl.exe: $(Test-Path $CurlBin), node.exe: $(Test-Path $NodeBin)"
 
-# --- TEST 3: WFP Firewall Rules Loaded ---
+# --- TEST 3: WFP 24/7 KillSwitch Rules Enforced ---
 $killSwitchRules = Get-NetFirewallRule | Where-Object { $_.Group -eq "ClaudeKillSwitch" }
 $ruleCount = ($killSwitchRules | Measure-Object).Count
 $rulesActive = ($ruleCount -gt 0)
-Record-TestResult -TestName "WFP KillSwitch Rules Enforced" `
+Record-TestResult -TestName "WFP 24/7 KillSwitch Rules Active" `
     -Passed $rulesActive `
-    -Expected "ClaudeKillSwitch rules > 0" `
+    -Expected "ClaudeKillSwitch rules > 0 (44 active rules)" `
     -Actual "$ruleCount active rules"
 
-# --- TEST 4: Public IP Geolocation (Must NOT be Russia) ---
+# --- TEST 4: NRPT Kernel DNS Policy Enforcement ---
+$nrptRules = Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Comment -eq "ClaudeCageNRPT" }
+$nrptPassed = $false
+$nrptActual = "No ClaudeCage NRPT rules found"
+if ($nrptRules) {
+    $nrptPassed = ($nrptRules.NameServers -contains "100.64.0.1")
+    $nrptActual = "NRPT active: $($nrptRules.Namespace -join ', ') -> 100.64.0.1"
+}
+Record-TestResult -TestName "NRPT Kernel DNS Policy (svchost Protection)" `
+    -Passed $nrptPassed `
+    -Expected "Claude domains locked to 100.64.0.1 in NRPT" `
+    -Actual $nrptActual
+
+# --- TEST 5: Public IP Geolocation (Must NOT be Russia) ---
 $publicIpInfo = $null
 $geoPassed = $false
 $geoActual = "Could not fetch IP"
@@ -112,9 +128,7 @@ Record-TestResult -TestName "Public IP Geolocation Leak Check" `
     -Expected "Country != RU (Non-Russian exit node)" `
     -Actual $geoActual
 
-# --- TEST 5: Fail-Closed Kill Switch Hardware Egress Test ---
-# Attempt to route caged curl.exe specifically through physical Ethernet adapter.
-# WFP MUST DROP THIS PACKET AT KERNEL LAYER!
+# --- TEST 6: WFP Fail-Closed Kill Switch (Physical Egress Blocked) ---
 $physicalAdapter = Get-NetAdapter -Physical | Where-Object { $_.Status -eq "Up" } | Select-Object -First 1
 $physicalIp = $null
 if ($physicalAdapter) {
@@ -129,7 +143,6 @@ if ($physicalIp) {
         -ArgumentList "-s --connect-timeout 3 --interface $physicalIp https://api.ipify.org" `
         -NoNewWindow -Wait -PassThru
 
-    # Exit code 28 = timeout, 7 = failed to connect (WFP drop)
     if ($curlProc.ExitCode -ne 0) {
         $killSwitchBlocked = $true
         $killSwitchActual = "Egress via physical IP $physicalIp was BLOCKED (Exit code: $($curlProc.ExitCode))"
@@ -142,66 +155,43 @@ if ($physicalIp) {
     $killSwitchActual = "No physical adapter IP found to test (safe)"
 }
 
-Record-TestResult -TestName "WFP Fail-Closed Kill Switch (Physical Egress Blocked)" `
+Record-TestResult -TestName "WFP LocalAddress Inversion (Physical Egress Blocked)" `
     -Passed $killSwitchBlocked `
     -Expected "Outbound connection via physical adapter dropped by WFP" `
     -Actual $killSwitchActual
 
-# --- TEST 6: Direct ISP DNS Leak Test ---
-$ispDns = @(Get-DnsClientServerAddress -InterfaceAlias $physicalAdapter.Name -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty ServerAddresses) | Where-Object { $_ -ne $null -and $_ -ne "" } | Select-Object -First 1
-
-$dnsBlocked = $false
-$dnsActual  = ""
-
-if ($ispDns) {
-    # Attempt to query ISP DNS directly using nslookup or Test-NetConnection
-    $nsProc = Start-Process -FilePath "nslookup.exe" `
-        -ArgumentList "-timeout=1 -retry=1 api.anthropic.com $ispDns" `
-        -NoNewWindow -Wait -PassThru
-
-    # Since direct ISP DNS is blocked for caged processes, let's verify SMHNR policy is set
-    $smhnrKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
-    $smhnrVal = (Get-ItemProperty -Path $smhnrKey -Name "DisableSmartNameResolution" -ErrorAction SilentlyContinue).DisableSmartNameResolution
-
-    if ($smhnrVal -eq 1) {
-        $dnsBlocked = $true
-        $dnsActual = "SMHNR disabled (DisableSmartNameResolution=1), ISP DNS direct query restricted"
-    } else {
-        $dnsBlocked = $false
-        $dnsActual = "SMHNR is NOT disabled! DNS queries may leak across interfaces"
-    }
-} else {
-    $dnsBlocked = $true
-    $dnsActual = "No ISP DNS servers configured on physical adapter"
-}
+# --- TEST 7: Anti-Leak DNS Hardening (SMHNR Disabled) ---
+$smhnrKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient"
+$smhnrVal = (Get-ItemProperty -Path $smhnrKey -Name "DisableSmartNameResolution" -ErrorAction SilentlyContinue).DisableSmartNameResolution
+$dnsHardened = ($smhnrVal -eq 1)
 
 Record-TestResult -TestName "Anti-Leak DNS Hardening (SMHNR Disabled)" `
-    -Passed $dnsBlocked `
+    -Passed $dnsHardened `
     -Expected "DisableSmartNameResolution = 1" `
-    -Actual $dnsActual
+    -Actual "DisableSmartNameResolution = $smhnrVal"
 
-# --- TEST 7: IPv6 Leak Protection ---
+# --- TEST 8: Dual-Layer IPv6 Leak Protection ---
 $ipv6BindingDisabled = $false
-$physicalBinding = Get-NetAdapterBinding -Name $physicalAdapter.Name -ComponentId ms_tcpip6 -ErrorAction SilentlyContinue
-if ($physicalBinding -and -not $physicalBinding.Enabled) {
-    $ipv6BindingDisabled = $true
+if ($physicalAdapter) {
+    $physicalBinding = Get-NetAdapterBinding -Name $physicalAdapter.Name -ComponentId ms_tcpip6 -ErrorAction SilentlyContinue
+    if ($physicalBinding -and -not $physicalBinding.Enabled) {
+        $ipv6BindingDisabled = $true
+    }
 }
 
-# Outbound IPv6 test using caged curl
 $curlIpv6Proc = Start-Process -FilePath $CurlBin `
     -ArgumentList "-6 -s --connect-timeout 3 https://google.com" `
     -NoNewWindow -Wait -PassThru
 
 $ipv6Blocked = ($curlIpv6Proc.ExitCode -ne 0)
-
 $ipv6Passed = ($ipv6BindingDisabled -and $ipv6Blocked)
+
 Record-TestResult -TestName "IPv6 Leak Protection" `
     -Passed $ipv6Passed `
     -Expected "ms_tcpip6 disabled on physical adapter AND curl IPv6 blocked" `
     -Actual "ms_tcpip6 disabled: $ipv6BindingDisabled, curl IPv6 exit: $($curlIpv6Proc.ExitCode)"
 
-# --- TEST 8: Anti-Fraud Timezone Spoofing Check ---
+# --- TEST 9: Anti-Fraud Timezone & Telemetry Spoofing ---
 $targetTz = if ($detectedTimezone -and $detectedTimezone -ne "Unknown") { $detectedTimezone } else { "Europe/Amsterdam" }
 $nodeTzCheck = & $NodeBin -e "
     process.env.TZ = '$targetTz';

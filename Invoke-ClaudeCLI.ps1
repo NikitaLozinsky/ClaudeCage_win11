@@ -3,9 +3,9 @@
     Invoke-ClaudeCLI.ps1 - Secure Anti-Fraud & Kill-Switched Launcher for Claude Code (CLI).
 .DESCRIPTION
     Wraps the Claude Code CLI inside the ClaudeCage sandbox:
-    1. Verifies AmneziaVPN connection status. Refuses to execute if VPN is down (Fail-Closed).
-    2. Enforces WFP Fail-Closed Kill Switch rules.
-    3. Injects anti-fraud timezone ($env:TZ), locale ($env:LANG), and prepends C:\ClaudeCage\bin to PATH.
+    1. Injects anti-fraud timezone ($env:TZ), locale ($env:LANG), and sets NODE_OPTIONS=--dns-result-order=ipv4first.
+    2. Prepends C:\ClaudeCage\bin to PATH so child processes use caged binaries.
+    3. Verifies that 24/7 atomic WFP Kill Switch rules are enforced for claude.exe.
     4. Forwards all command line arguments transparently to claude.exe.
 #>
 
@@ -29,7 +29,7 @@ $vpnAdapter = Get-NetAdapter | Where-Object {
 $isVpnUp = ($vpnAdapter -ne $null)
 
 if (-not $isVpnUp) {
-    Write-Host "[!] [CLAUDECAGE OFFLINE] AmneziaVPN is not active. Running Claude CLI in offline mode." -ForegroundColor DarkYellow
+    Write-Host "[!] [CLAUDECAGE OFFLINE] AmneziaVPN is not active. Running Claude CLI in offline mode (Fail-Closed)." -ForegroundColor DarkYellow
 }
 
 # 2. Check / Sync Kill Switch rules
@@ -51,10 +51,11 @@ if ($isVpnUp -and (Test-Path $CurlBin)) {
     } catch {}
 }
 
-# 4. Inject Anti-Fraud Environment Variables
+# 4. Inject Anti-Fraud Environment Variables & Node options
 $env:TZ = $vpnTz
 $env:LANG = "en_US.UTF-8"
 $env:LC_ALL = "en_US.UTF-8"
+$env:NODE_OPTIONS = "--dns-result-order=ipv4first"
 $env:PATH = "$CageBin;$env:PATH"
 
 # 5. Locate Claude CLI Binary

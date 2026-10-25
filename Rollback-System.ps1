@@ -120,13 +120,31 @@ foreach ($adapter in $adapters) {
     }
 }
 
-# 5. Flush DNS Cache
-Write-Host "`n[*] [5/6] Flushing DNS client cache..." -ForegroundColor Yellow
+# 5. Remove NRPT (Name Resolution Policy Table) Rules
+Write-Host "`n[*] [5/7] Removing ClaudeCage NRPT rules..." -ForegroundColor Yellow
+$nrptRules = Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Comment -eq "ClaudeCageNRPT" }
+if ($nrptRules) {
+    foreach ($r in $nrptRules) {
+        Remove-DnsClientNrptRule -Name $r.Name -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "    [OK] Removed $(($nrptRules | Measure-Object).Count) ClaudeCage NRPT rule(s)." -ForegroundColor Green
+} else {
+    Write-Host "    [OK] No ClaudeCage NRPT rules found." -ForegroundColor Gray
+}
+
+# Restore Location API Consent
+$locConsentKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location\NonPackaged"
+if (Test-Path $locConsentKey) {
+    Remove-ItemProperty -Path $locConsentKey -Name "Value" -Force -ErrorAction SilentlyContinue
+}
+
+# 6. Flush DNS Cache
+Write-Host "`n[*] [6/7] Flushing DNS client cache..." -ForegroundColor Yellow
 Clear-DnsClientCache
 Write-Host "    [OK] DNS cache flushed." -ForegroundColor Green
 
-# 6. Restore ExecutionPolicy
-Write-Host "`n[*] [6/6] Restoring PowerShell ExecutionPolicy..." -ForegroundColor Yellow
+# 7. Restore ExecutionPolicy
+Write-Host "`n[*] [7/7] Restoring PowerShell ExecutionPolicy..." -ForegroundColor Yellow
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Undefined -Force -ErrorAction SilentlyContinue
 Write-Host "    [OK] ExecutionPolicy restored." -ForegroundColor Green
 

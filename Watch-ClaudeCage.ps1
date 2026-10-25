@@ -101,13 +101,7 @@ try {
         if ($previousVpnState -ne $null -and $previousVpnState -ne $currentVpnState) {
             $metrics.VpnTransitions++
             $color = if ($currentVpnState -eq "CONNECTED") { [ConsoleColor]::Green } else { [ConsoleColor]::Red }
-            Write-CageLog "TRANSITION" "VPN State changed: $previousVpnState -> $currentVpnState (Interface: $($metrics.VpnInterface))" $color
-
-            # Trigger auto-sync of firewall rules if topology changed
-            $syncScript = Join-Path $CageRoot "Sync-ClaudeFirewall.ps1"
-            if (Test-Path $syncScript) {
-                try { & $syncScript -Enforce | Out-Null } catch {}
-            }
+            Write-CageLog "TRANSITION" "VPN State changed: $previousVpnState -> $currentVpnState (Interface: $($metrics.VpnInterface)) [Protected by 24/7 LocalAddress Inversion]" $color
         }
         $previousVpnState = $currentVpnState
 

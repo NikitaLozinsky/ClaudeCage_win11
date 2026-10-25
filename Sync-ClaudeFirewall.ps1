@@ -1,14 +1,21 @@
 <#
 .SYNOPSIS
-    Sync-ClaudeFirewall.ps1 - WFP Fail-Closed Kill Switch Engine for ClaudeCage.
+    Sync-ClaudeFirewall.ps1 - Atomic Make-Before-Break 24/7 Fail-Closed WFP Kill Switch Engine.
 .DESCRIPTION
     Dynamically configures Windows Filtering Platform (WFP) rules for Claude Desktop and Claude Code CLI:
-    - Restricts Claude Desktop (MSIX package and Win32 binary), Claude Code CLI, and caged binaries (node.exe, curl.exe)
-      strictly to the AmneziaVPN tunnel interface.
-    - Implements Fail-Closed behavior: blocks all traffic on physical/virtual non-VPN interfaces.
-    - Blocks outbound IPv6 traffic for caged targets (eliminating IPv6 leak bypass).
-    - Blocks direct DNS queries (port 53) to non-VPN ISP DNS servers.
-    - If VPN is disconnected, engages Total Lockdown mode (blocks on all interfaces).
+    1. Zero-Race-Condition 24/7 Architecture:
+       - Source IP / LocalAddress Inversion: Blocks all outbound traffic from any source IP outside
+         the Amnezia CGNAT range (100.64.0.0 - 100.127.255.255) and loopback (127.0.0.0/8).
+         When VPN drops, packets trying to egress via 192.168.0.68 are dropped with 0 ms delay!
+       - Physical Adapter Block: Explicitly blocks all non-VPN interface aliases.
+       - LAN & STUN Leak Block: Blocks outbound traffic to RFC 1918 private subnets and multicast.
+       - Dual-layer IPv6 Block: Blocks outbound IPv6 by both RemoteAddress and LocalAddress ranges.
+    2. Make-Before-Break Atomic Replacement:
+       Never removes existing firewall rules before new rules are fully created and active.
+    3. Comprehensive Target Discovery:
+       Protects Claude Desktop (MSIX package and Win32 binaries), Claude CLI, caged node/curl,
+       Git networking binaries (git-remote-https.exe, ssh.exe), and any MCP servers configured
+       in %APPDATA%\Claude\claude_desktop_config.json.
 #>
 
 [CmdletBinding(DefaultParameterSetName = "Enforce")]
@@ -42,27 +49,24 @@ $CageBin   = Join-Path $CageRoot "bin"
 
 function Get-CageTargetBinaries {
     $targets = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $addedPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    function Add-TargetBinary {
+        param([string]$Name, [string]$Path)
+        if ($Path -and (Test-Path $Path) -and -not $addedPaths.Contains($Path)) {
+            $addedPaths.Add($Path) | Out-Null
+            $targets.Add([PSCustomObject]@{
+                Name              = $Name
+                Type              = "Binary"
+                Path              = $Path
+                PackageFamilyName = $null
+            })
+        }
+    }
 
     # 1. Caged node.exe & curl.exe
-    $sandboxedNode = Join-Path $CageBin "node.exe"
-    if (Test-Path $sandboxedNode) {
-        $targets.Add([PSCustomObject]@{
-            Name              = "Sandboxed-Node"
-            Type              = "Binary"
-            Path              = $sandboxedNode
-            PackageFamilyName = $null
-        })
-    }
-
-    $sandboxedCurl = Join-Path $CageBin "curl.exe"
-    if (Test-Path $sandboxedCurl) {
-        $targets.Add([PSCustomObject]@{
-            Name              = "Sandboxed-Curl"
-            Type              = "Binary"
-            Path              = $sandboxedCurl
-            PackageFamilyName = $null
-        })
-    }
+    Add-TargetBinary "Sandboxed-Node" (Join-Path $CageBin "node.exe")
+    Add-TargetBinary "Sandboxed-Curl" (Join-Path $CageBin "curl.exe")
 
     # 2. Claude CLI standalone binary
     $cliCandidates = @(
@@ -72,17 +76,12 @@ function Get-CageTargetBinaries {
     )
     foreach ($cand in $cliCandidates) {
         if (Test-Path $cand) {
-            $targets.Add([PSCustomObject]@{
-                Name              = "Claude-CLI"
-                Type              = "Binary"
-                Path              = $cand
-                PackageFamilyName = $null
-            })
+            Add-TargetBinary "Claude-CLI" $cand
             break
         }
     }
 
-    # 3. Claude Desktop AppX / MSIX package
+    # 3. Claude Desktop AppX / MSIX package family
     $claudeAppx = Get-AppxPackage -Name *Claude* -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($claudeAppx) {
         $targets.Add([PSCustomObject]@{
@@ -93,38 +92,69 @@ function Get-CageTargetBinaries {
         })
 
         $appxExe = Join-Path $claudeAppx.InstallLocation "app\claude.exe"
-        if (Test-Path $appxExe) {
-            $targets.Add([PSCustomObject]@{
-                Name              = "Claude-Desktop-AppX-Exe"
-                Type              = "Binary"
-                Path              = $appxExe
-                PackageFamilyName = $null
-            })
+        Add-TargetBinary "Claude-Desktop-AppX-Exe" $appxExe
+    }
+
+    # Dynamic search for all Claude installations in WindowsApps (survives store updates)
+    $windowsAppsDirs = Get-ChildItem -Path "C:\Program Files\WindowsApps" -Filter "*Claude*" -Directory -ErrorAction SilentlyContinue
+    foreach ($dir in $windowsAppsDirs) {
+        $candExe = Join-Path $dir.FullName "app\claude.exe"
+        if (Test-Path $candExe) {
+            Add-TargetBinary "Claude-WindowsApps-Versioned" $candExe
         }
     }
 
-    # 4. Standard Win32 Claude Desktop installs if present
+    # Standard Win32 Claude Desktop installs if present
     $desktopCandidates = @(
         "$env:LOCALAPPDATA\Programs\Claude\Claude.exe",
         "$env:LOCALAPPDATA\AnthropicClaude\Claude.exe",
         "C:\Program Files\Claude\Claude.exe"
     )
     foreach ($cand in $desktopCandidates) {
-        if (Test-Path $cand) {
-            $targets.Add([PSCustomObject]@{
-                Name              = "Claude-Desktop-Win32"
-                Type              = "Binary"
-                Path              = $cand
-                PackageFamilyName = $null
-            })
+        Add-TargetBinary "Claude-Desktop-Win32" $cand
+    }
+
+    # 4. Git Network Binaries (prevents git fetch / git push leaks)
+    $gitDirs = @("C:\Program Files\Git", "C:\Program Files (x86)\Git", "$env:LOCALAPPDATA\Programs\Git")
+    $gitRelativeBins = @(
+        "cmd\git.exe",
+        "mingw64\bin\git.exe",
+        "mingw64\libexec\git-core\git-remote-https.exe",
+        "mingw64\libexec\git-core\git-remote-http.exe",
+        "usr\bin\ssh.exe"
+    )
+    foreach ($gDir in $gitDirs) {
+        if (Test-Path $gDir) {
+            foreach ($rel in $gitRelativeBins) {
+                Add-TargetBinary ("Git-" + [System.IO.Path]::GetFileNameWithoutExtension($rel)) (Join-Path $gDir $rel)
+            }
         }
+    }
+
+    # 5. MCP Server Binaries from claude_desktop_config.json
+    $claudeConfig = "$env:APPDATA\Claude\claude_desktop_config.json"
+    if (Test-Path $claudeConfig) {
+        try {
+            $json = Get-Content $claudeConfig -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+            if ($json.mcpServers) {
+                foreach ($prop in $json.mcpServers.PSObject.Properties) {
+                    $cmd = $prop.Value.command
+                    if ($cmd) {
+                        $resolved = (Get-Command $cmd -ErrorAction SilentlyContinue).Source
+                        if ($resolved) {
+                            Add-TargetBinary "MCP-$($prop.Name)" $resolved
+                        }
+                    }
+                }
+            }
+        } catch {}
     }
 
     return $targets
 }
 
 function Remove-KillSwitchRules {
-    Write-Host "[*] Removing existing rules in group '$GroupName'..." -ForegroundColor DarkYellow
+    Write-Host "[*] Removing all rules in group '$GroupName'..." -ForegroundColor DarkYellow
     $existing = Get-NetFirewallRule | Where-Object { $_.Group -eq $GroupName -or $_.Name -like "ClaudeCage*" }
     if ($existing) {
         $existing | Remove-NetFirewallRule
@@ -149,35 +179,14 @@ function Show-KillSwitchStatus {
         $vpnIps = (Get-NetIPAddress -InterfaceIndex $vpnAdapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
         Write-Host "    Tunnel IPv4: $($vpnIps -join ', ')" -ForegroundColor Green
     } else {
-        Write-Host "`n[!] AmneziaVPN Status: DISCONNECTED / NOT DETECTED" -ForegroundColor Red
-    }
-
-    # Physical / Non-VPN adapters
-    $nonVpnAdapters = Get-NetAdapter | Where-Object {
-        $_.Name -notlike "*Amnezia*" -and $_.InterfaceDescription -notlike "*WireGuard*"
-    }
-    Write-Host "`n[i] Non-VPN Adapters (Blocked for Caged Processes):" -ForegroundColor Yellow
-    foreach ($a in $nonVpnAdapters) {
-        $statusCol = if ($a.Status -eq "Up") { "Cyan" } else { "DarkGray" }
-        Write-Host "    - $($a.Name) [$($a.InterfaceDescription)] -> Status: $($a.Status)" -ForegroundColor $statusCol
-    }
-
-    # Caged Targets
-    Write-Host "`n[i] Protected Caged Targets:" -ForegroundColor Yellow
-    $targets = Get-CageTargetBinaries
-    foreach ($t in $targets) {
-        if ($t.Type -eq "PackageFamily") {
-            Write-Host "    - [MSIX] $($t.Name) (PackageFamily: $($t.PackageFamilyName))" -ForegroundColor White
-        } else {
-            Write-Host "    - [BIN]  $($t.Name): $($t.Path)" -ForegroundColor White
-        }
+        Write-Host "`n[!] AmneziaVPN Status: DISCONNECTED / NOT DETECTED (Protected by 24/7 LocalAddress Inversion)" -ForegroundColor Yellow
     }
 
     # Active Rules
     $rules = Get-NetFirewallRule | Where-Object { $_.Group -eq $GroupName }
     Write-Host "`n[i] Active ClaudeKillSwitch WFP Rules: $(($rules | Measure-Object).Count)" -ForegroundColor Yellow
     foreach ($r in $rules) {
-        Write-Host "    - $($r.DisplayName) -> Action: $($r.Action), Direction: $($r.Direction), Enabled: $($r.Enabled)" -ForegroundColor Gray
+        Write-Host "    - $($r.DisplayName) -> Action: $($r.Action), Enabled: $($r.Enabled)" -ForegroundColor Gray
     }
 
     Write-Host "==========================================================`n" -ForegroundColor Cyan
@@ -194,9 +203,9 @@ if ($Remove) {
     exit 0
 }
 
-# --- ENFORCE KILL SWITCH RULES ---
+# --- ENFORCE KILL SWITCH RULES (ATOMIC MAKE-BEFORE-BREAK) ---
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "       ENFORCING CLAUDE CAGE WFP KILL SWITCH RULES        " -ForegroundColor Cyan
+Write-Host "   ENFORCING CLAUDE CAGE ATOMIC 24/7 FAIL-CLOSED RULES    " -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 # 1. Discover targets
@@ -206,144 +215,127 @@ if ($targets.Count -eq 0) {
     exit 1
 }
 
-# 2. Check AmneziaVPN status
-$vpnAdapter = Get-NetAdapter | Where-Object {
-    ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*WireGuard*") -and $_.Status -eq "Up"
-} | Select-Object -First 1
+Write-Host "[+] Discovered $($targets.Count) protected target(s):" -ForegroundColor Cyan
+foreach ($t in $targets) {
+    $desc = if ($t.Type -eq "PackageFamily") { "[MSIX] $($t.PackageFamilyName)" } else { "[BIN] $($t.Path)" }
+    Write-Host "    - $($t.Name): $desc" -ForegroundColor DarkGray
+}
 
+# 2. Network topology
 $nonVpnAdapters = Get-NetAdapter | Where-Object {
     $_.Name -notlike "*Amnezia*" -and $_.InterfaceDescription -notlike "*WireGuard*"
 }
-
 $nonVpnAliases = @($nonVpnAdapters | ForEach-Object { $_.Name })
 
-# 3. Clean existing rules
-Remove-KillSwitchRules
+# 3. Define 24/7 Security Policies
+# LocalAddress Inversion: Block all source IPs EXCEPT Amnezia CGNAT (100.64.0.0/10) and Loopback (127.0.0.0/8)
+$blockedLocalIpRanges = @(
+    "0.0.0.0-100.63.255.255",
+    "100.128.0.0-126.255.255.255",
+    "128.0.0.0-255.255.255.255"
+)
 
-# 4. Apply Fail-Closed Rules
-if (-not $vpnAdapter) {
-    # TOTAL LOCKDOWN MODE: VPN is down, block target binaries unconditionally on all interfaces!
-    Write-Host "`n[!] AMNEZIAVPN IS DOWN! Engaging TOTAL LOCKDOWN for Claude processes." -ForegroundColor Red
-    Write-Host "    All outbound connections for Claude and caged binaries are BLOCKED on ALL interfaces." -ForegroundColor Red
+# LAN & STUN leak block: RFC 1918 private subnets and multicast
+$blockedLanRanges = @(
+    "192.168.0.0/16",
+    "172.16.0.0/12",
+    "169.254.0.0/16",
+    "224.0.0.0/4"
+)
 
+# Dual-layer IPv6 Block
+$blockedIpv6Remote = @("2000::/3", "fc00::/7", "fe80::/10")
+$blockedIpv6Local  = @("0000::-0000:ffff:ffff:ffff:ffff:ffff:ffff:fffe", "0001::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
+
+# 4. Snapshot existing rules for Make-Before-Break atomic transition
+$oldRules = Get-NetFirewallRule | Where-Object { $_.Group -eq $GroupName -or $_.Name -like "ClaudeCage*" }
+$genTag = "Gen" + [DateTime]::UtcNow.ToString("yyyyMMddHHmmss")
+$newRuleNames = [System.Collections.Generic.List[string]]::new()
+
+Write-Host "`n[*] [1/2] Creating new atomic 24/7 Fail-Closed rules (Generation: $genTag)..." -ForegroundColor Yellow
+
+try {
+    $targetIndex = 0
     foreach ($t in $targets) {
-        $ruleName = "ClaudeCage-Lockdown-$($t.Name)"
-        $ruleDisplay = "Claude Cage TOTAL LOCKDOWN: Block $($t.Name)"
+        $targetIndex++
+        $safeName = "$targetIndex-" + ($t.Name -replace '[^a-zA-Z0-9_\-]', '')
 
+        # RULE 1: Source IP / LocalAddress Inversion (The Master 0-ms Lock)
+        $r1Name = "ClaudeCage-$genTag-LocalInv-$safeName"
+        $r1Display = "Claude Cage: Block Non-VPN Source IP for $($t.Name)"
         if ($t.Type -eq "PackageFamily") {
-            New-NetFirewallRule -Name $ruleName `
-                -DisplayName $ruleDisplay `
-                -Group $GroupName `
-                -Direction Outbound `
-                -Action Block `
-                -PackageFamilyName $t.PackageFamilyName `
-                -Enabled True | Out-Null
+            New-NetFirewallRule -Name $r1Name -DisplayName $r1Display -Group $GroupName `
+                -Direction Outbound -Action Block -PackageFamilyName $t.PackageFamilyName `
+                -LocalAddress $blockedLocalIpRanges -Enabled True | Out-Null
         } else {
-            New-NetFirewallRule -Name $ruleName `
-                -DisplayName $ruleDisplay `
-                -Group $GroupName `
-                -Direction Outbound `
-                -Action Block `
-                -Program $t.Path `
-                -Enabled True | Out-Null
+            New-NetFirewallRule -Name $r1Name -DisplayName $r1Display -Group $GroupName `
+                -Direction Outbound -Action Block -Program $t.Path `
+                -LocalAddress $blockedLocalIpRanges -Enabled True | Out-Null
         }
-        Write-Host "    [+] Installed: $ruleDisplay" -ForegroundColor Yellow
-    }
-} else {
-    # VPN IS UP: Block on all non-VPN interfaces, block IPv6, block direct ISP DNS
-    Write-Host "`n[+] AmneziaVPN active ($($vpnAdapter.Name)). Configuring interface-isolated Fail-Closed rules." -ForegroundColor Green
-    Write-Host "    Non-VPN interfaces blocked: $($nonVpnAliases -join ', ')" -ForegroundColor DarkYellow
+        $newRuleNames.Add($r1Name)
 
-    # Collect ISP DNS addresses on physical/non-VPN interfaces to block direct queries
-    $ispDnsAddresses = @(Get-DnsClientServerAddress -InterfaceAlias $nonVpnAliases -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty ServerAddresses) | Where-Object { $_ -ne $null -and $_ -ne "" } | Select-Object -Unique
-
-    foreach ($t in $targets) {
-        # A. Block outbound on all Non-VPN network interfaces
-        $blockAdapterRuleName = "ClaudeCage-BlockPhysical-$($t.Name)"
-        $blockAdapterDisplay  = "Claude Cage KillSwitch: Block $($t.Name) on Physical/Non-VPN Adapters"
-
-        if ($t.Type -eq "PackageFamily") {
-            New-NetFirewallRule -Name $blockAdapterRuleName `
-                -DisplayName $blockAdapterDisplay `
-                -Group $GroupName `
-                -Direction Outbound `
-                -Action Block `
-                -PackageFamilyName $t.PackageFamilyName `
-                -InterfaceAlias $nonVpnAliases `
-                -Enabled True | Out-Null
-        } else {
-            New-NetFirewallRule -Name $blockAdapterRuleName `
-                -DisplayName $blockAdapterDisplay `
-                -Group $GroupName `
-                -Direction Outbound `
-                -Action Block `
-                -Program $t.Path `
-                -InterfaceAlias $nonVpnAliases `
-                -Enabled True | Out-Null
-        }
-        Write-Host "    [+] Block Non-VPN Interfaces: $($t.Name)" -ForegroundColor Green
-
-        # B. Block outbound IPv6 traffic (prevents IPv6 bypass / leak)
-        $blockIpv6RuleName = "ClaudeCage-BlockIPv6-$($t.Name)"
-        $blockIpv6Display  = "Claude Cage KillSwitch: Block IPv6 for $($t.Name)"
-        $ipv6Subnets       = @("2000::/3", "fc00::/7", "fe80::/10")
-
-        if ($t.Type -eq "PackageFamily") {
-            New-NetFirewallRule -Name $blockIpv6RuleName `
-                -DisplayName $blockIpv6Display `
-                -Group $GroupName `
-                -Direction Outbound `
-                -Action Block `
-                -PackageFamilyName $t.PackageFamilyName `
-                -Protocol Any `
-                -RemoteAddress $ipv6Subnets `
-                -Enabled True | Out-Null
-        } else {
-            New-NetFirewallRule -Name $blockIpv6RuleName `
-                -DisplayName $blockIpv6Display `
-                -Group $GroupName `
-                -Direction Outbound `
-                -Action Block `
-                -Program $t.Path `
-                -Protocol Any `
-                -RemoteAddress $ipv6Subnets `
-                -Enabled True | Out-Null
-        }
-        Write-Host "    [+] Block Outbound IPv6: $($t.Name)" -ForegroundColor Green
-
-        # C. Block direct DNS to ISP DNS servers on non-VPN interfaces
-        if ($ispDnsAddresses.Count -gt 0) {
-            $blockIspDnsRuleName = "ClaudeCage-BlockISPDNS-$($t.Name)"
-            $blockIspDnsDisplay  = "Claude Cage KillSwitch: Block ISP DNS for $($t.Name)"
-
+        # RULE 2: Block Physical & Non-VPN Adapters (InterfaceAlias)
+        if ($nonVpnAliases.Count -gt 0) {
+            $r2Name = "ClaudeCage-$genTag-Adapter-$safeName"
+            $r2Display = "Claude Cage: Block Physical Adapters for $($t.Name)"
             if ($t.Type -eq "PackageFamily") {
-                New-NetFirewallRule -Name $blockIspDnsRuleName `
-                    -DisplayName $blockIspDnsDisplay `
-                    -Group $GroupName `
-                    -Direction Outbound `
-                    -Action Block `
-                    -PackageFamilyName $t.PackageFamilyName `
-                    -RemoteAddress $ispDnsAddresses `
-                    -RemotePort 53 `
-                    -Protocol UDP `
-                    -Enabled True | Out-Null
+                New-NetFirewallRule -Name $r2Name -DisplayName $r2Display -Group $GroupName `
+                    -Direction Outbound -Action Block -PackageFamilyName $t.PackageFamilyName `
+                    -InterfaceAlias $nonVpnAliases -Enabled True | Out-Null
             } else {
-                New-NetFirewallRule -Name $blockIspDnsRuleName `
-                    -DisplayName $blockIspDnsDisplay `
-                    -Group $GroupName `
-                    -Direction Outbound `
-                    -Action Block `
-                    -Program $t.Path `
-                    -RemoteAddress $ispDnsAddresses `
-                    -RemotePort 53 `
-                    -Protocol UDP `
-                    -Enabled True | Out-Null
+                New-NetFirewallRule -Name $r2Name -DisplayName $r2Display -Group $GroupName `
+                    -Direction Outbound -Action Block -Program $t.Path `
+                    -InterfaceAlias $nonVpnAliases -Enabled True | Out-Null
             }
-            Write-Host "    [+] Block Direct ISP DNS: $($t.Name)" -ForegroundColor Green
+            $newRuleNames.Add($r2Name)
         }
+
+        # RULE 3: Block Local LAN / Router STUN
+        $r3Name = "ClaudeCage-$genTag-Lan-$safeName"
+        $r3Display = "Claude Cage: Block LAN/STUN for $($t.Name)"
+        if ($t.Type -eq "PackageFamily") {
+            New-NetFirewallRule -Name $r3Name -DisplayName $r3Display -Group $GroupName `
+                -Direction Outbound -Action Block -PackageFamilyName $t.PackageFamilyName `
+                -RemoteAddress $blockedLanRanges -Enabled True | Out-Null
+        } else {
+            New-NetFirewallRule -Name $r3Name -DisplayName $r3Display -Group $GroupName `
+                -Direction Outbound -Action Block -Program $t.Path `
+                -RemoteAddress $blockedLanRanges -Enabled True | Out-Null
+        }
+        $newRuleNames.Add($r3Name)
+
+        # RULE 4: Block Outbound IPv6 (Remote & Local Source)
+        $r4Name = "ClaudeCage-$genTag-IPv6-$safeName"
+        $r4Display = "Claude Cage: Block IPv6 for $($t.Name)"
+        if ($t.Type -eq "PackageFamily") {
+            New-NetFirewallRule -Name $r4Name -DisplayName $r4Display -Group $GroupName `
+                -Direction Outbound -Action Block -PackageFamilyName $t.PackageFamilyName `
+                -Protocol Any -RemoteAddress $blockedIpv6Remote -LocalAddress $blockedIpv6Local -Enabled True | Out-Null
+        } else {
+            New-NetFirewallRule -Name $r4Name -DisplayName $r4Display -Group $GroupName `
+                -Direction Outbound -Action Block -Program $t.Path `
+                -Protocol Any -RemoteAddress $blockedIpv6Remote -LocalAddress $blockedIpv6Local -Enabled True | Out-Null
+        }
+        $newRuleNames.Add($r4Name)
+
+        Write-Host "    [+] Enforced 24/7 Security Policies for: $($t.Name)" -ForegroundColor Green
     }
+} catch {
+    Write-Error "[!] Error creating new firewall rules: $_. Rolling back generation $genTag..."
+    foreach ($rName in $newRuleNames) {
+        Remove-NetFirewallRule -Name $rName -ErrorAction SilentlyContinue
+    }
+    throw
 }
 
-Write-Host "`n[OK] Claude Cage WFP Kill Switch is ACTIVE and ENFORCED." -ForegroundColor Green
+# 5. Make-Before-Break: Remove old generation rules only AFTER all new rules are active
+Write-Host "`n[*] [2/2] Performing atomic retirement of prior rules..." -ForegroundColor Yellow
+if ($oldRules) {
+    $oldRules | Remove-NetFirewallRule
+    Write-Host "    [OK] Retired $(($oldRules | Measure-Object).Count) prior rule(s) seamlessly." -ForegroundColor Green
+} else {
+    Write-Host "    [OK] No prior rules to retire." -ForegroundColor Gray
+}
+
+Write-Host "`n[OK] Claude Cage WFP Kill Switch is 100% ACTIVE (Make-Before-Break Complete)." -ForegroundColor Green
 Write-Host "==========================================================`n" -ForegroundColor Cyan

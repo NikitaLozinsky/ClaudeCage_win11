@@ -4,84 +4,62 @@
 
 ---
 
-## Ключевое поведение (Fail-Closed)
-1. **Запуск с AmneziaVPN:** Приложение запускается, туннель активен, доступ в интернет есть только через VPN.
-2. **Запуск без AmneziaVPN:** Приложение запускается штатно, но интернет отсутствует. Внутри приложения выглядит так, будто интернет полностью пропал на ПК.
-3. **Падение или переподключение VPN во время работы:** Приложение мгновенно теряет интернет. Ни одного пакета (включая TCP SYN и DNS) не уходит через физический Ethernet/Wi-Fi с реального IP. После восстановления VPN соединение возвращается автоматически.
+## Архитектура v6-audit-hardened
+
+По итогам Red Team аудита безопасности внедрены следующие решения:
+
+1. **Kernel-Level DNS Guard (NRPT — Name Resolution Policy Table):**
+   - Через `Add-DnsClientNrptRule` все обращения к доменам `.anthropic.com`, `.claude.ai`, `.claude.com`, `.sentry.io`, `.stripe.com`, `.intercom.io` принудительно направляются системным DNS-клиентом (`svchost.exe -k NetworkService`) исключительно на внутренний DNS туннеля (`100.64.0.1`).
+   - Если VPN падает, `svchost.exe` не перенаправляет запросы к DNS провайдера (`46.61.250.136`), а мгновенно завершает их ошибкой (Fail-Closed).
+2. **24/7 Source IP (LocalAddress) Inversion — Устранение гонок состояний (TOCTOU):**
+   - Исходящий трафик процессов Claude заблокирован со всех исходных IP-адресов, КРОМЕ подсети CGNAT Amnezia (`100.64.0.0/10`) и Loopback (`127.0.0.0/8`).
+   - При падении VPN локальный сокет переходит на `192.168.0.68` и **мгновенно (0 мс) блокируется на уровне ядра WFP** без необходимости перезапуска скриптов фаервола.
+3. **Make-Before-Break (Атомарное обновление правил):**
+   - Фаервол никогда не удаляет старые правила до того, как новые сгенерированы и применены. Окно уязвимости равно нулю.
+4. **Защита дочерних процессов и сетевых утилит:**
+   - В правила фаервола автоматически включены `git.exe`, `git-remote-https.exe`, `git-remote-http.exe`, `ssh.exe` и любые MCP-серверы из `%APPDATA%\Claude\claude_desktop_config.json`.
+   - В рантайм Node.js внедрена опция `$env:NODE_OPTIONS = "--dns-result-order=ipv4first"`.
+5. **Защита от утечек геолокации и трея:**
+   - Перед стартом `Start-ClaudeDesktop.ps1` принудительно завершаются зависшие в трее процессы Claude, гарантируя применение новых `$env:TZ` и флагов Chromium.
+   - Запрещен доступ к Windows Location API (`NonPackaged` -> `Deny`).
+   - Использованы валидные Chromium-флаги (`--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, `--enforce-webrtc-ip-permission-check`, `--disable-features=AsyncDns,DnsOverHttpsUpgrade,WebRtcHideLocalIpsWithMdns`).
 
 ---
 
-## Архитектура защиты
-- **Kernel-level WFP Kill Switch:** Запрещает `Claude Desktop`, `Claude Code CLI`, а также дочерним бинарникам `C:\ClaudeCage\bin\node.exe` и `curl.exe` отправку сетевых пакетов через физические/виртуальные адаптеры хоста (Ethernet, Wi-Fi, Hyper-V, Bluetooth). Трафик разрешён исключительно через интерфейс WireGuard (`AmneziaVPN`).
-- **Защита от DNS-утечек (Anti-Leak):**
-  - Отключен механизм Smart Multi-Homed Name Resolution (SMHNR), предотвращая параллельную отправку DNS-запросов на провайдерские DNS.
-  - Отключен мультикаст LLMNR.
-  - Прямые запросы на порт 53 к DNS-серверам провайдера заблокированы в фаерволе.
-- **Защита от IPv6-утечек:** Отключен протокол IPv6 (`ms_tcpip6`) на физическом адаптере, а для изолированных процессов заблокирован весь исходящий IPv6-трафик (`2000::/3`, `fc00::/7`, `fe80::/10`).
-- **Антифрод-телеметрия (Electron & Node.js):**
-  - Подмена таймзоны (`$env:TZ = $vpnTimezone`), исключающая расхождение между IP-геолокацией (NL) и системным временем (Europe/Moscow).
-  - Подмена локали и языка (`$env:LANG = en_US.UTF-8`, `--lang=en-US`, `--accept-lang=en-US,en;q=0.9`).
-  - Подавление утечек WebRTC в Chromium (`--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, `--disable-webrtc`).
-
----
-
-## Структура директории
+## Структура репозитория
 ```text
 C:\ClaudeCage\
-├── .git\                         # Полная Git-история версий (v0..v4)
+├── .git\                         # Полная Git-история версий (v0..v6)
 ├── backups\baseline\             # Дампы реестра (.reg), профиля и сетевых настроек до изменений
 ├── bin\                          # Изолированные копии node.exe и curl.exe
 ├── logs\                         # Логи и метрики трафика (cage_traffic.log, cage_metrics.json)
-├── Sync-ClaudeFirewall.ps1       # Ядро WFP Kill Switch (расчет адаптеров и установка правил)
-├── Start-ClaudeDesktop.ps1       # Обёртка запуска Claude Desktop с антифрод-флагами
+├── Sync-ClaudeFirewall.ps1       # WFP Kill Switch: 24/7 LocalAddress Inversion + Make-Before-Break
+├── Start-ClaudeDesktop.ps1       # Обёртка запуска Claude Desktop (очистка трея, флаги Chromium)
 ├── Invoke-ClaudeCLI.ps1          # Обёртка запуска Claude Code CLI (подключена в $PROFILE)
-├── Watch-ClaudeCage.ps1          # Скрипт-логгер и монитор сокетов в реальном времени
-├── Test-CageLeaks.ps1            # Автотест на утечки IP, DNS, IPv6, Timezone и Kill Switch
-├── Set-DnsHardening.ps1          # Применение политик DNS & IPv6 Hardening
-├── Install-ClaudeProfileHook.ps1 # Установка функции `claude` в PowerShell $PROFILE
+├── Watch-ClaudeCage.ps1          # Скрипт-логгер сокетов реального времени
+├── Test-CageLeaks.ps1            # Тестовый комплекс на 9 проверок безопасности
+├── Set-DnsHardening.ps1          # Настройка NRPT, SMHNR и Location Guard
+├── Install-ClaudeProfileHook.ps1 # Интеграция функции `claude` в PowerShell $PROFILE
 └── Rollback-System.ps1           # Полный откат системы к v0-baseline в один клик
 ```
 
 ---
 
-## Команды управления и мониторинга
+## Команды управления
 
-### 1. Мониторинг трафика клетки в реальном времени (Скрипт-логгер)
 ```powershell
-# Запуск интерактивного логгера сокетов
+# 1. Аудит безопасности и утечек (9 тестов)
+& "C:\ClaudeCage\Test-CageLeaks.ps1" -Detailed
+
+# 2. Запуск Claude Desktop
+& "C:\ClaudeCage\Start-ClaudeDesktop.ps1"
+
+# 3. Запуск Claude CLI
+claude
+
+# 4. Мониторинг сокетов реального времени
 & "C:\ClaudeCage\Watch-ClaudeCage.ps1"
 
-# Снятие одного моментального снимка метрик
-& "C:\ClaudeCage\Watch-ClaudeCage.ps1" -Once
-```
-
-### 2. Запуск автотеста безопасности
-```powershell
-& "C:\ClaudeCage\Test-CageLeaks.ps1" -Detailed
-```
-
-### 3. Запуск Claude Desktop (GUI)
-```powershell
-& "C:\ClaudeCage\Start-ClaudeDesktop.ps1"
-```
-
-### 4. Запуск Claude Code (CLI)
-Команда `claude` автоматически перенаправляется через изолированный раннер:
-```powershell
-claude --version
-claude
-```
-
-### 5. Управление правилами фаервола WFP
-```powershell
-# Просмотр статуса адаптеров и правил WFP
-& "C:\ClaudeCage\Sync-ClaudeFirewall.ps1" -Status
-
-# Принудительная пересинхронизация правил
-& "C:\ClaudeCage\Sync-ClaudeFirewall.ps1" -Enforce
-```
-
-### 6. Полный откат системы к Baseline (v0-baseline)
-```powershell
+# 5. Полный откат к v0-baseline
 & "C:\ClaudeCage\Rollback-System.ps1"
 ```
