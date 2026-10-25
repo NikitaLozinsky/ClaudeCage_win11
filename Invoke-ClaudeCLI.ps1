@@ -26,17 +26,10 @@ $vpnAdapter = Get-NetAdapter | Where-Object {
     ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*WireGuard*") -and $_.Status -eq "Up"
 } | Select-Object -First 1
 
-if (-not $vpnAdapter) {
-    Write-Host "`n[FAIL-CLOSED ALERT] AmneziaVPN is NOT connected or tunnel is down!" -ForegroundColor Red
-    Write-Host "Claude Code CLI execution ABORTED to prevent real IP/telemetry leakage." -ForegroundColor Red
-    Write-Host "Please start AmneziaVPN before running Claude Code.`n" -ForegroundColor Yellow
+$isVpnUp = ($vpnAdapter -ne $null)
 
-    # Ensure lockdown rules are engaged
-    $syncScript = Join-Path $CageRoot "Sync-ClaudeFirewall.ps1"
-    if (Test-Path $syncScript) {
-        try { & $syncScript -Enforce } catch {}
-    }
-    exit 1
+if (-not $isVpnUp) {
+    Write-Host "[!] [CLAUDECAGE OFFLINE] AmneziaVPN is not active. Running Claude CLI in offline mode." -ForegroundColor DarkYellow
 }
 
 # 2. Check / Sync Kill Switch rules
@@ -46,9 +39,9 @@ if (-not $existingRules) {
     try { & $syncScript -Enforce } catch {}
 }
 
-# 3. Detect VPN Geolocation & Timezone
+# 3. Detect VPN Geolocation & Timezone (with safe fallback)
 $vpnTz = "Europe/Amsterdam"
-if (Test-Path $CurlBin) {
+if ($isVpnUp -and (Test-Path $CurlBin)) {
     try {
         $ipJson = & $CurlBin -s --connect-timeout 3 https://ipinfo.io/json
         if ($ipJson) {

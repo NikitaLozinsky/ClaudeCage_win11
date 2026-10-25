@@ -1,4 +1,6 @@
 # ClaudeCage gitignore
 *.tmp
 *.log
+logs/*
+!logs/.gitkeep
 !/backups/**

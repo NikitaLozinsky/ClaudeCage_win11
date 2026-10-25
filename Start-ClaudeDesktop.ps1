@@ -31,23 +31,18 @@ $vpnAdapter = Get-NetAdapter | Where-Object {
     ($_.Name -like "*Amnezia*" -or $_.InterfaceDescription -like "*WireGuard*") -and $_.Status -eq "Up"
 } | Select-Object -First 1
 
-if (-not $vpnAdapter) {
-    Write-Host "`n[FAIL-CLOSED ALERT] AmneziaVPN is NOT connected or tunnel is down!" -ForegroundColor Red
-    Write-Host "Claude Desktop launch ABORTED to prevent real IP/telemetry leakage." -ForegroundColor Red
-    Write-Host "Please start AmneziaVPN and re-run this launcher.`n" -ForegroundColor Yellow
+$isVpnUp = ($vpnAdapter -ne $null)
 
-    # Ensure lockdown rules are engaged if elevated
-    $syncScript = Join-Path $CageRoot "Sync-ClaudeFirewall.ps1"
-    if (Test-Path $syncScript) {
-        try { & $syncScript -Enforce } catch {}
-    }
-    exit 1
+if ($isVpnUp) {
+    Write-Host "    [OK] AmneziaVPN is UP (Interface: $($vpnAdapter.Name))." -ForegroundColor Green
+} else {
+    Write-Host "`n[!] [OFFLINE MODE] AmneziaVPN is NOT connected or tunnel is down!" -ForegroundColor DarkYellow
+    Write-Host "    Claude Desktop will launch in OFFLINE mode (Fail-Closed)." -ForegroundColor Yellow
+    Write-Host "    WFP Kill Switch prevents all egress via physical adapters; to Claude, internet is unavailable.`n" -ForegroundColor DarkYellow
 }
 
-Write-Host "    [OK] AmneziaVPN is UP (Interface: $($vpnAdapter.Name))." -ForegroundColor Green
-
 # 2. Sync / Verify WFP Kill Switch Rules
-Write-Host "`n[*] [2/5] Verifying WFP Fail-Closed Kill Switch rules..." -ForegroundColor Yellow
+Write-Host "[*] [2/5] Verifying WFP Fail-Closed Kill Switch rules..." -ForegroundColor Yellow
 $syncScript = Join-Path $CageRoot "Sync-ClaudeFirewall.ps1"
 if (Test-Path $syncScript) {
     try {
@@ -58,13 +53,13 @@ if (Test-Path $syncScript) {
     }
 }
 
-# 3. Detect VPN Geolocation & Timezone
-Write-Host "`n[*] [3/5] Resolving VPN exit node timezone & anti-fraud telemetry..." -ForegroundColor Yellow
+# 3. Detect VPN Geolocation & Timezone (with safe fallback)
+Write-Host "`n[*] [3/5] Resolving timezone & anti-fraud telemetry..." -ForegroundColor Yellow
 $vpnTz = "Europe/Amsterdam"
 $vpnCountry = "NL"
-$vpnIp = "Unknown"
+$vpnIp = "Offline / Protected"
 
-if (Test-Path $CurlBin) {
+if ($isVpnUp -and (Test-Path $CurlBin)) {
     try {
         $ipJson = & $CurlBin -s --connect-timeout 4 https://ipinfo.io/json
         if ($ipJson) {
