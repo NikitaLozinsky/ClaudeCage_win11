@@ -3,4 +3,6 @@
 *.log
 logs/*
 !logs/.gitkeep
+backups/baseline/system_baseline_created.txt
+backups/baseline/user_profile.ps1
 !/backups/**
