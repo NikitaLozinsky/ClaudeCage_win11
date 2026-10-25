@@ -1,65 +1,147 @@
-# ClaudeCage: Windows 11 Hardened Sandbox for Claude Desktop & CLI
+# 🛡️ ClaudeCage: Аппаратный WFP-бункер для Claude на Windows 11
 
-Непробиваемая изолированная среда («клетка») для запуска **Claude Desktop (Electron)** и **Claude Code (CLI)** исключительно через туннель **AmneziaVPN** с аппаратным WFP Kill Switch на уровне ядра Windows и защитой от антифрод-телеметрии.
+<p align="center">
+  <img src="https://img.shields.io/badge/OS-Windows%2011-0078D4?logo=windows11&logoColor=white" alt="Windows 11" />
+  <img src="https://img.shields.io/badge/VPN-AmneziaVPN%20(WireGuard)-blue?logo=wireguard&logoColor=white" alt="AmneziaVPN" />
+  <img src="https://img.shields.io/badge/Security-Fail--Closed%20(0ms%20Drop)-success" alt="Fail-Closed" />
+  <img src="https://img.shields.io/badge/WFP-Kernel--Level%20Filter-orange" alt="WFP" />
+  <img src="https://img.shields.io/badge/Tests-9%2F9%20PASS%20(Zero%20Leaks)-brightgreen" alt="Tests" />
+</p>
 
----
-
-## Архитектура v6-audit-hardened
-
-По итогам Red Team аудита безопасности внедрены следующие решения:
-
-1. **Kernel-Level DNS Guard (NRPT — Name Resolution Policy Table):**
-   - Через `Add-DnsClientNrptRule` все обращения к доменам `.anthropic.com`, `.claude.ai`, `.claude.com`, `.sentry.io`, `.stripe.com`, `.intercom.io` принудительно направляются системным DNS-клиентом (`svchost.exe -k NetworkService`) исключительно на внутренний DNS туннеля (`100.64.0.1`).
-   - Если VPN падает, `svchost.exe` не перенаправляет запросы к DNS провайдера (`46.61.250.136`), а мгновенно завершает их ошибкой (Fail-Closed).
-2. **24/7 Source IP (LocalAddress) Inversion — Устранение гонок состояний (TOCTOU):**
-   - Исходящий трафик процессов Claude заблокирован со всех исходных IP-адресов, КРОМЕ подсети CGNAT Amnezia (`100.64.0.0/10`) и Loopback (`127.0.0.0/8`).
-   - При падении VPN локальный сокет переходит на `192.168.0.68` и **мгновенно (0 мс) блокируется на уровне ядра WFP** без необходимости перезапуска скриптов фаервола.
-3. **Make-Before-Break (Атомарное обновление правил):**
-   - Фаервол никогда не удаляет старые правила до того, как новые сгенерированы и применены. Окно уязвимости равно нулю.
-4. **Защита дочерних процессов и сетевых утилит:**
-   - В правила фаервола автоматически включены `git.exe`, `git-remote-https.exe`, `git-remote-http.exe`, `ssh.exe` и любые MCP-серверы из `%APPDATA%\Claude\claude_desktop_config.json`.
-   - В рантайм Node.js внедрена опция `$env:NODE_OPTIONS = "--dns-result-order=ipv4first"`.
-5. **Защита от утечек геолокации и трея:**
-   - Перед стартом `Start-ClaudeDesktop.ps1` принудительно завершаются зависшие в трее процессы Claude, гарантируя применение новых `$env:TZ` и флагов Chromium.
-   - Запрещен доступ к Windows Location API (`NonPackaged` -> `Deny`).
-   - Использованы валидные Chromium-флаги (`--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, `--enforce-webrtc-ip-permission-check`, `--disable-features=AsyncDns,DnsOverHttpsUpgrade,WebRtcHideLocalIpsWithMdns`).
+Изолированная среда («клетка») для **Claude Desktop (Electron)** и **Claude Code (CLI)**. Гарантирует, что Claude работает **строго через туннель AmneziaVPN**, а при любом обрыве или сбое VPN **мгновенно теряет доступ в сеть (0 мс)** без малейшего шанса узнать твой реальный IP-адрес или провайдера.
 
 ---
 
-## Структура репозитория
-```text
-C:\ClaudeCage\
-├── .git\                         # Полная Git-история версий (v0..v6)
-├── backups\baseline\             # Дампы реестра (.reg), профиля и сетевых настроек до изменений
-├── bin\                          # Изолированные копии node.exe и curl.exe
-├── logs\                         # Логи и метрики трафика (cage_traffic.log, cage_metrics.json)
-├── Sync-ClaudeFirewall.ps1       # WFP Kill Switch: 24/7 LocalAddress Inversion + Make-Before-Break
-├── Start-ClaudeDesktop.ps1       # Обёртка запуска Claude Desktop (очистка трея, флаги Chromium)
-├── Invoke-ClaudeCLI.ps1          # Обёртка запуска Claude Code CLI (подключена в $PROFILE)
-├── Watch-ClaudeCage.ps1          # Скрипт-логгер сокетов реального времени
-├── Test-CageLeaks.ps1            # Тестовый комплекс на 9 проверок безопасности
-├── Set-DnsHardening.ps1          # Настройка NRPT, SMHNR и Location Guard
-├── Install-ClaudeProfileHook.ps1 # Интеграция функции `claude` в PowerShell $PROFILE
-└── Rollback-System.ps1           # Полный откат системы к v0-baseline в один клик
-```
+## ☕ 1. Что это и зачем нужно простыми словами
+
+Представь, что Claude живет в **цифровой звуконепроницаемой комнате с бронированной дверью**:
+
+1. **Единственный выход наружу — туннель AmneziaVPN.** Claude физически не знает, что у твоего компьютера есть домашний кабель интернета или Wi-Fi.
+2. **Идеальная маскировка под европейца:** Claude видит нидерландский IP-адрес, амстердамское системное время (UTC+2) и английскую локаль.
+3. **Железный принцип Fail-Closed:**
+   - **VPN включен** → Claude летает на полной скорости.
+   - **VPN отключился или залагал** → для Claude интернет **мгновенно умирает на корню**. Он не видит ни твоего настоящего провайдера, ни твоего города. С его точки зрения, на всем компьютере просто выдернули кабель из сети.
 
 ---
 
-## Команды управления
+## ⚡ 2. Быстрая установка на любой Windows 11 (За 1 минуту)
+
+### Требования:
+- **Windows 11** (любая редакция)
+- Установленный клиент **[AmneziaVPN](https://amnezia.org)** (с подключенным туннелем)
+- Права Администратора на ПК
+
+---
+
+### Вариант А: Установка через PowerShell (Рекомендуемый)
+
+Открой **PowerShell от имени Администратора** и вставь команду:
 
 ```powershell
-# 1. Аудит безопасности и утечек (9 тестов)
-& "C:\ClaudeCage\Test-CageLeaks.ps1" -Detailed
+git clone https://github.com/NikitaLozinsky/ClaudeCage_win11.git C:\ClaudeCage
+powershell -ExecutionPolicy Bypass -File C:\ClaudeCage\Setup-ClaudeCage.ps1
+```
 
-# 2. Запуск Claude Desktop
-& "C:\ClaudeCage\Start-ClaudeDesktop.ps1"
+---
 
-# 3. Запуск Claude CLI
+### Вариант Б: Без Git (Скачать архивом)
+
+1. Скачай репозиторий ZIP-архивом: [Скачать ZIP](https://github.com/NikitaLozinsky/ClaudeCage_win11/archive/refs/heads/main.zip).
+2. Распакуй содержимое архива в папку: **`C:\ClaudeCage`**.
+3. Зайди в папку `C:\ClaudeCage` и просто дважды кликни по файлу **`Setup.bat`** (он сам запросит права Администратора).
+
+---
+
+### ⚙️ Что установщик сделает автоматически:
+* 📸 **Сделает бэкап системы (Baseline):** сохранит твои текущие настройки реестра, адаптеров и фаервола, чтобы скрипт отката вернул именно твой ПК в исходное состояние.
+* 🔒 **Включит защиту от DNS-утечек (NRPT):** запретит системному демону `svchost.exe` опрашивать провайдерский DNS при обрыве VPN.
+* 🧱 **Установит 24/7 аппаратный замок WFP:** заблокирует любые попытки выхода Claude через твой домашний IP на уровне ядра Windows.
+* 🚀 **Создаст ярлык на рабочем столе:** `Claude (Secure Cage)` для защищенного запуска приложения.
+* 💻 **Подключит CLI-хук:** команда `claude` в любом терминале PowerShell сразу станет защищенной.
+* 🧪 **Проведет самодиагностику:** прогонит 9 тестов на утечки и выдаст зеленый отчет.
+
+---
+
+## 🕹️ 3. Как пользоваться каждый день
+
+### 🔹 Запуск десктопного приложения Claude Desktop
+Кликни по ярлыку на рабочем столе: **`Claude (Secure Cage)`**  
+*(При запуске он сам почистит старые процессы в трее, выставит европейскую таймзону и заблокирует утечки WebRTC)*.
+
+### 🔹 Запуск терминального Claude Code (CLI)
+В любом окне PowerShell просто введи:
+```powershell
 claude
+```
+Команда прозрачно выполняется внутри изолированной клетки.
 
-# 4. Мониторинг сокетов реального времени
+### 🔹 Мониторинг сокетов в реальном времени (Логгер)
+Если хочешь своими глазами наблюдать за сокетами Claude и видеть вердикты ядра WFP:
+```powershell
 & "C:\ClaudeCage\Watch-ClaudeCage.ps1"
+```
+- 🟢 `[VERDICT: ALLOWED VIA AMNEZIAVPN]` — трафик безопасно идет через туннель.
+- 🔴 `[VERDICT: BLOCKED BY WFP DROP]` — пакет на физический IP срезан ядром Windows.
+- 🔵 `[VERDICT: LOCAL IPC / MCP]` — внутренний трафик локальных MCP-серверов (`127.0.0.1`).
 
-# 5. Полный откат к v0-baseline
+---
+
+## 🧪 4. Как протестировать защиту (Краш-тест)
+
+1. **Проверка утечек в штатном режиме:**
+   ```powershell
+   & "C:\ClaudeCage\Test-CageLeaks.ps1" -Detailed
+   ```
+   *Все 9 тестов должны быть зелеными `[PASS]`, IP — Нидерланды, провайдерский DNS недоступен.*
+
+2. **Краш-тест на обрыв VPN:**
+   - Открой клиент AmneziaVPN и нажми **«Отключить»**.
+   - Попробуй запустить `claude` в консоли или отправить сообщение в Claude Desktop.
+   - **Результат:** Приложение не крашится, но соединения нет вообще («No internet connection»). Ни единый пакет не вышел наружу через твой домашний роутер.
+   - Включи VPN обратно — связь восстановится автоматически.
+
+---
+
+## 🧩 5. Почему обычный VPN сливает твой IP
+
+| Уязвимость обычного VPN | Как это работает без клетки | Как защищает ClaudeCage |
+| :--- | :--- | :--- |
+| **Обрыв VPN на лету** | Сокет мгновенно перескакивает на домашний интернет | 🛑 **0 мс Drop** на уровне ядра Windows (LocalAddress Inversion) |
+| **DNS-утечки (`svchost.exe`)** | Служба DNS Windows опрашивает домашний DNS провайдера РФ | 🔒 Политика **NRPT** принудительно запирает домены Claude на DNS туннеля |
+| **WebRTC IP Leak** | Браузер Chromium сливает домашний `192.168.0.68` через STUN | 🛡️ WebRTC заблокирован на уровне флагов Chromium |
+| **Таймзона** | Несовпадение: IP Нидерландов, а время московское (UTC+3) | 🕒 Принудительный спуфинг `$env:TZ = Europe/Amsterdam` |
+| **Дочерние утилиты** | `git fetch/push` и MCP-серверы идут мимо VPN | 📦 Бинарники Git (`git-remote-https.exe`, `ssh.exe`) и MCP под замком |
+
+---
+
+## 🔄 6. Полный откат системы (Rollback в 1 клик)
+
+Если тебе понадобится удалить клетку и вернуть систему в исходное состояние, скрипт отката сделает все в один клик:
+```powershell
 & "C:\ClaudeCage\Rollback-System.ps1"
 ```
+Он удалит правила фаервола `ClaudeKillSwitch`, снимет правила NRPT, восстановит оригинальный реестр из локального бэкапа `backups\baseline\`, вернет старый `$PROFILE` и восстановит IPv6.
+
+---
+
+## 📂 Структура репозитория
+```text
+C:\ClaudeCage\
+├── Setup.bat                     # 1-Click установщик для запуска двойным кликом
+├── Setup-ClaudeCage.ps1          # Главный оркестратор автоматической установки
+├── Start-ClaudeDesktop.ps1       # Безопасный лаунчер Claude Desktop с антифрод-флагами
+├── Invoke-ClaudeCLI.ps1          # Безопасный лаунчер Claude Code (подключен в $PROFILE)
+├── Sync-ClaudeFirewall.ps1       # Ядро WFP Kill Switch (24/7 LocalAddress Inversion)
+├── Set-DnsHardening.ps1          # Настройка NRPT (svchost lock), SMHNR и Location Guard
+├── Watch-ClaudeCage.ps1          # Монитор-логгер сокетов реального времени
+├── Test-CageLeaks.ps1            # Тестовый аудит на 9 проверок безопасности
+├── Rollback-System.ps1           # Полный возврат системы к исходному состоянию
+├── bin\                          # Изолированные бинарники node.exe и curl.exe
+└── backups\                      # Локальные снапшоты системы для безопасного отката
+```
+
+---
+
+<p align="center">
+  <b>Разработано для безопасной и анонимной работы с Anthropic Claude на Windows 11.</b>
+</p>
