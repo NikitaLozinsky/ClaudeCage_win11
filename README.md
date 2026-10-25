@@ -127,6 +127,7 @@ claude
 ## 📂 Структура репозитория
 ```text
 C:\ClaudeCage\
+├── ARCHITECTURE.md               # Подробная архитектура, Mermaid-диаграмма и разбор слоев защиты
 ├── Setup.bat                     # 1-Click установщик для запуска двойным кликом
 ├── Setup-ClaudeCage.ps1          # Главный оркестратор автоматической установки
 ├── Start-ClaudeDesktop.ps1       # Безопасный лаунчер Claude Desktop с антифрод-флагами
