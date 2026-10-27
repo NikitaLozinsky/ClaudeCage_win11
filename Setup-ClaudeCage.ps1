@@ -138,7 +138,9 @@ if (Test-Path $shortcutScript) {
 }
 
 # Set PowerShell execution policy for CurrentUser
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force -ErrorAction SilentlyContinue
+try {
+    Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force -ErrorAction SilentlyContinue
+} catch {}
 
 # 7. Configure Background Auto-Sync Task (Runs at Startup and Logon)
 Write-Host "`n[*] [7/8] Registering Windows Scheduled Task for 24/7 boot synchronization..." -ForegroundColor Yellow
