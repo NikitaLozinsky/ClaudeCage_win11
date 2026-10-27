@@ -9,16 +9,38 @@
 #>
 
 [CmdletBinding()]
-param()
+param(
+    [string]$IconPath = ""
+)
 
 $ErrorActionPreference = 'Stop'
 
 $TargetRoot = "C:\ClaudeCage"
 $Launcher   = Join-Path $TargetRoot "Start-ClaudeDesktop.ps1"
-$IcoPath    = Join-Path $TargetRoot "claude.ico"
+$IconsDir   = Join-Path $TargetRoot "icons"
 
-# 1. Ensure 256px Claude.ico exists
-if (-not (Test-Path $IcoPath)) {
+# 1. Determine Icon Path (prioritizes custom icons in C:\ClaudeCage\icons\)
+$IcoPath = $null
+if ($IconPath -and (Test-Path $IconPath)) {
+    $IcoPath = (Resolve-Path $IconPath).Path
+} else {
+    $iconCandidates = @(
+        (Join-Path $IconsDir "ClaudeCage.ico"),
+        (Join-Path $IconsDir "ClaudeCage1.ico"),
+        (Join-Path $IconsDir "claude.ico"),
+        (Join-Path $TargetRoot "claude.ico")
+    )
+    foreach ($cand in $iconCandidates) {
+        if (Test-Path $cand) {
+            $IcoPath = $cand
+            break
+        }
+    }
+}
+
+# Fallback: Extract from WindowsApps if no icon file exists anywhere
+if (-not $IcoPath -or -not (Test-Path $IcoPath)) {
+    $IcoPath = Join-Path $TargetRoot "claude.ico"
     Write-Host "[*] Extracting high-resolution Claude icon..." -ForegroundColor Yellow
     $pngCandidates = Get-ChildItem -Path "C:\Program Files\WindowsApps" -Filter "*Square44x44Logo.targetsize-256*.png" -Recurse -ErrorAction SilentlyContinue |
         Where-Object { $_.FullName -like "*Claude*" } | Select-Object -First 1
@@ -51,6 +73,8 @@ if (-not (Test-Path $IcoPath)) {
         Write-Host "    [OK] High-resolution claude.ico created." -ForegroundColor Green
     }
 }
+
+Write-Host "[*] Configuring shortcut with icon: $IcoPath" -ForegroundColor Cyan
 
 $wsh = New-Object -ComObject WScript.Shell
 

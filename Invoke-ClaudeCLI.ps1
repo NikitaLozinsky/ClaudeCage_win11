@@ -57,7 +57,7 @@ if (-not $isVpnUp) {
 
 # 2. Check / Sync Kill Switch rules
 $syncScript = Join-Path $CageRoot "Sync-ClaudeFirewall.ps1"
-$existingRules = Get-NetFirewallRule | Where-Object { $_.Group -eq "ClaudeKillSwitch" }
+$existingRules = Get-NetFirewallRule -Group "ClaudeKillSwitch" -ErrorAction SilentlyContinue
 if (-not $existingRules) {
     try { & $syncScript -Enforce } catch {}
 }
