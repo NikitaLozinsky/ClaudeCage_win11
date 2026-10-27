@@ -289,7 +289,7 @@ try {
                     $remIp     = $conn.RemoteAddress
                     $remPort   = $conn.RemotePort
                     $state     = $conn.State
-                    $pid       = $conn.OwningProcess
+                    $procPid   = $conn.OwningProcess
                     $hint      = Get-HostNameHint $remIp
 
                     if ($remIp -ne "127.0.0.1" -and $remIp -ne "::1") {
@@ -301,26 +301,26 @@ try {
                     if ($localIp -eq "127.0.0.1" -or $remIp -eq "127.0.0.1" -or $remIp -eq "::1") {
                         $stats.SocketsLocalIpc++
                         if ($Detailed) {
-                            Write-Host "    [IPC]       PID ${pid}: ${localIp}:${localPort} <-> ${remIp}:${remPort} ($state) [$hint]" -ForegroundColor DarkCyan
+                            Write-Host "    [IPC]       PID ${procPid}: ${localIp}:${localPort} <-> ${remIp}:${remPort} ($state) [$hint]" -ForegroundColor DarkCyan
                         }
-                        Write-AuditLog "IPC" "PID ${pid}: ${localIp}:${localPort} <-> ${remIp}:${remPort} ($state) [$hint]" DarkCyan -NoConsole:(-not $Detailed)
+                        Write-AuditLog "IPC" "PID ${procPid}: ${localIp}:${localPort} <-> ${remIp}:${remPort} ($state) [$hint]" DarkCyan -NoConsole:(-not $Detailed)
                     }
                     # B. Outbound via VPN Tunnel
                     elseif ($localIp -eq $vpnIp -or ($vpnAdapter -and $conn.InterfaceIndex -eq $vpnAdapter.InterfaceIndex)) {
                         $stats.SocketsAllowedViaVpn++
-                        Write-Host "    [TUNNEL]    PID ${pid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [$hint] [VERDICT: ALLOWED VIA VPN]" -ForegroundColor Green
-                        Write-AuditLog "TUNNEL" "PID ${pid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [$hint] [ALLOWED VIA VPN]" Green
+                        Write-Host "    [TUNNEL]    PID ${procPid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [$hint] [VERDICT: ALLOWED VIA VPN]" -ForegroundColor Green
+                        Write-AuditLog "TUNNEL" "PID ${procPid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [$hint] [ALLOWED VIA VPN]" Green
                     }
                     # C. Outbound via Physical Adapter (LEAK ATTEMPT / WFP BLOCKED)
                     elseif ($localIp -eq $physIp) {
                         $stats.SocketsBlockedLeaks++
-                        Write-Host "    [LEAK-BLOCKED] PID ${pid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [VERDICT: BLOCKED BY KERNEL WFP]" -ForegroundColor Red
-                        Write-AuditLog "LEAK-BLOCKED" "PID ${pid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [BLOCKED BY KERNEL WFP]" Red
+                        Write-Host "    [LEAK-BLOCKED] PID ${procPid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [VERDICT: BLOCKED BY KERNEL WFP]" -ForegroundColor Red
+                        Write-AuditLog "LEAK-BLOCKED" "PID ${procPid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [BLOCKED BY KERNEL WFP]" Red
                     }
                     # D. Other Sockets
                     else {
-                        Write-Host "    [SOCKET]    PID ${pid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [$hint]" -ForegroundColor DarkGray
-                        Write-AuditLog "SOCKET" "PID ${pid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [$hint]" DarkGray
+                        Write-Host "    [SOCKET]    PID ${procPid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [$hint]" -ForegroundColor DarkGray
+                        Write-AuditLog "SOCKET" "PID ${procPid}: ${localIp}:${localPort} -> ${remIp}:${remPort} ($state) [$hint]" DarkGray
                     }
                 }
             }
@@ -365,7 +365,8 @@ try {
     Write-Host "Total Sockets Audited:        $($stats.TotalSocketsSeen)" -ForegroundColor White
     Write-Host "Sockets Allowed via VPN:      $($stats.SocketsAllowedViaVpn)" -ForegroundColor Green
     Write-Host "Internal IPC / Loopback:      $($stats.SocketsLocalIpc)" -ForegroundColor DarkCyan
-    Write-Host "Blocked Physical Leaks:       $($stats.SocketsBlockedLeaks)" -ForegroundColor (if ($stats.SocketsBlockedLeaks -eq 0) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow })
+    $leakColor = if ($stats.SocketsBlockedLeaks -eq 0) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow }
+    Write-Host "Blocked Physical Leaks:       $($stats.SocketsBlockedLeaks)" -ForegroundColor $leakColor
     Write-Host "Kernel WFP 0-ms Drops:        $($stats.KernelDropsDetected)" -ForegroundColor Green
     Write-Host "Unique Remote Endpoints:      $($stats.UniqueRemoteIps)" -ForegroundColor Cyan
     
