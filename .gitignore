@@ -7,3 +7,9 @@ logs/*
 # Machine-specific baseline backups (registry keys, adapter GUIDs, firewall exports, IPs)
 backups/baseline/*
 !backups/baseline/.gitkeep
+
+# Native compiled binaries
+*.exe
+*.syso
+builds/**/*.exe
+
