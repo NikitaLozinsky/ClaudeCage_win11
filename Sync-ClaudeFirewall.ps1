@@ -101,6 +101,14 @@ function Get-CageTargetBinaries {
     Add-TargetBinary "ClaudeCage-Core" (Join-Path $CageRoot "ClaudeCage.exe")
     Add-TargetBinary "ClaudeCage-Latest" (Join-Path $CageRoot "builds\latest\ClaudeCage.exe")
 
+    # Dynamic registration for all versioned ClaudeCage builds
+    $versionedBuilds = Get-ChildItem -Path (Join-Path $CageRoot "builds") -Filter "ClaudeCage.exe" -Recurse -File -ErrorAction SilentlyContinue
+    $vIdx = 0
+    foreach ($vb in $versionedBuilds) {
+        Add-TargetBinary "ClaudeCage-Build-$vIdx" $vb.FullName
+        $vIdx++
+    }
+
     # 2. Iterate across all real user profiles in C:\Users (guarantees NT AUTHORITY\SYSTEM finds user installations)
     $userProfiles = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { 
         $_.Name -notin @("Public", "Default", "Default User", "All Users") 

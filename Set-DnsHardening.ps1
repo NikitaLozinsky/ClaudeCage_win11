@@ -82,9 +82,16 @@ if ($existingNrpt) {
 }
 
 $targetNamespaces = @(
-    ".anthropic.com",
+    # Core Anthropic / Claude endpoints (both apex and wildcard subdomains)
+    "claude.ai",
     ".claude.ai",
+    "anthropic.com",
+    ".anthropic.com",
+    "claude.com",
     ".claude.com",
+    "ipinfo.io",
+    ".ipinfo.io",
+    # Telemetry, Auth & Gateways
     ".sentry.io",
     ".stripe.com",
     ".intercom.io",
@@ -92,15 +99,26 @@ $targetNamespaces = @(
     ".statsigapi.net",
     ".featuregates.org",
     ".workos.com",
-    ".ipinfo.io",
+    # CDNs & Infrastructure
     ".cloudfront.net",
     ".amazonaws.com",
+    ".amazontrust.com",
     ".fastly.net",
+    ".cloudflare.com",
+    ".cloudflare.net",
+    ".cloudflareinsights.com",
     ".vercel-dns.com",
     ".vercel.app",
     ".github.com",
     ".githubusercontent.com",
-    ".pki.goog"
+    # Google services / Fonts / Chromium telemetry
+    ".gstatic.com",
+    ".googleapis.com",
+    ".gvt1.com",
+    # PKI, OCSP & Certificate Authorities (prevents CRL/OCSP revocation leaks via ISP DNS)
+    ".pki.goog",
+    ".digicert.com",
+    ".lencr.org"
 )
 
 Add-DnsClientNrptRule -Namespace $targetNamespaces `

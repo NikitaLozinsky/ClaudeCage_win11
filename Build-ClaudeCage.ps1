@@ -185,11 +185,11 @@ if (-not $NoShortcuts) {
     $sc = $wsh.CreateShortcut($desktopLnk)
     $sc.TargetPath = $rootExe
     $sc.Arguments = ""
-    $sc.WorkingDirectory = $TargetRoot
+    $sc.WorkingDirectory = $env:USERPROFILE
     $sc.Description = "Claude"
     $sc.IconLocation = "$IconFile,0"
     $sc.Save()
-    Write-Host "    [+] Desktop shortcut 'Claude' -> $rootExe" -ForegroundColor Green
+    Write-Host "    [+] Desktop shortcut 'Claude' -> $rootExe (Cwd: $env:USERPROFILE)" -ForegroundColor Green
 
     $startMenuPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
     if (Test-Path $startMenuPath) {
@@ -197,11 +197,11 @@ if (-not $NoShortcuts) {
         $scStart = $wsh.CreateShortcut($startLnk)
         $scStart.TargetPath = $rootExe
         $scStart.Arguments = ""
-        $scStart.WorkingDirectory = $TargetRoot
+        $scStart.WorkingDirectory = $env:USERPROFILE
         $scStart.Description = "Claude"
         $scStart.IconLocation = "$IconFile,0"
         $scStart.Save()
-        Write-Host "    [+] Start Menu shortcut 'Claude' -> $rootExe" -ForegroundColor Green
+        Write-Host "    [+] Start Menu shortcut 'Claude' -> $rootExe (Cwd: $env:USERPROFILE)" -ForegroundColor Green
     }
 
     # Update PowerShell Profile Hook (Stealth / Neutral naming)

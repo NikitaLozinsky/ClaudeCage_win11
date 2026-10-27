@@ -14,8 +14,8 @@ import (
 )
 
 var (
-	Version   = "v6.3.2"
-	BuildDate = "2026-10-27T22:30:00Z"
+	Version   = "v6.3.3"
+	BuildDate = "2026-10-27T23:00:00Z"
 	Commit    = "development"
 )
 
@@ -50,6 +50,26 @@ func getCageRoot() string {
 	return "C:\\ClaudeCage"
 }
 
+// isForbiddenGeo returns true if the detected country or timezone belongs to restricted regions
+func isForbiddenGeo(country, tz string) bool {
+	c := strings.ToUpper(strings.TrimSpace(country))
+	if c == "RU" || c == "BY" {
+		return true
+	}
+	t := strings.ToLower(strings.TrimSpace(tz))
+	forbiddenIndicators := []string{
+		"moscow", "minsk", "samara", "yekaterinburg", "novosibirsk",
+		"vladivostok", "krasnoyarsk", "volgograd", "omsk", "chelyabinsk",
+		"rostov", "ufa", "kazan", "irkutsk", "kaliningrad", "belarus", "russia",
+	}
+	for _, ind := range forbiddenIndicators {
+		if strings.Contains(t, ind) {
+			return true
+		}
+	}
+	return false
+}
+
 func isVpnUp() (bool, string, string) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -57,27 +77,34 @@ func isVpnUp() (bool, string, string) {
 	}
 	for _, iface := range interfaces {
 		name := strings.ToLower(iface.Name)
+		// Ignore virtual pseudo-interfaces like Teredo or ISATAP
+		if strings.Contains(name, "teredo") || strings.Contains(name, "isatap") {
+			continue
+		}
 		if iface.Flags&net.FlagUp != 0 {
-			if strings.Contains(name, "amnezia") || strings.Contains(name, "wireguard") || strings.Contains(name, "wintun") || strings.Contains(name, "vpn") || strings.Contains(name, "tun") {
-				// Verify interface has assigned IPv4 address
+			if strings.Contains(name, "amnezia") || strings.Contains(name, "wireguard") || strings.Contains(name, "wintun") || strings.Contains(name, "vpn") || strings.Contains(name, "tun") || strings.Contains(name, "tailscale") {
+				// Verify interface has assigned, non-link-local IPv4 address
 				addrs, err := iface.Addrs()
 				if err == nil {
 					for _, addr := range addrs {
-						if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-							if ipnet.IP.To4() != nil {
-								return true, iface.Name, ipnet.IP.String()
+						if ipnet, ok := addr.(*net.IPNet); ok {
+							ip4 := ipnet.IP.To4()
+							if ip4 != nil && !ip4.IsLoopback() && !ip4.IsLinkLocalUnicast() && !ip4.IsUnspecified() {
+								return true, iface.Name, ip4.String()
 							}
 						}
 					}
 				}
-				return true, iface.Name, "Assigned"
+				// If interface is UP but has no valid routed IPv4, do NOT return true (prevents false positives)
 			}
 		}
 	}
 	return false, "None", ""
 }
 
-func resolveVpnTimezone(vpnIp string) string {
+// resolveVpnTimezone resolves the timezone for the VPN egress IP.
+// Returns (timezone, isAllowed). If a forbidden country/city is detected, returns ("", false).
+func resolveVpnTimezone(vpnIp string) (string, bool) {
 	cageRoot := getCageRoot()
 	logsDir := filepath.Join(cageRoot, "logs")
 	cacheFile := filepath.Join(logsDir, "tz_cache.json")
@@ -87,7 +114,11 @@ func resolveVpnTimezone(vpnIp string) string {
 		var cache TzCache
 		if json.Unmarshal(data, &cache) == nil {
 			if cache.VpnIP == vpnIp && cache.Timezone != "" && time.Since(cache.Timestamp) < 1*time.Hour {
-				return cache.Timezone
+				if isForbiddenGeo("", cache.Timezone) {
+					_ = os.Remove(cacheFile)
+					return "", false
+				}
+				return cache.Timezone, true
 			}
 		}
 	}
@@ -99,6 +130,10 @@ func resolveVpnTimezone(vpnIp string) string {
 		defer resp.Body.Close()
 		var info IpInfoResponse
 		if json.NewDecoder(resp.Body).Decode(&info) == nil && info.Timezone != "" {
+			if isForbiddenGeo(info.Country, info.Timezone) {
+				_ = os.Remove(cacheFile)
+				return "", false
+			}
 			// Write to cache
 			_ = os.MkdirAll(logsDir, 0755)
 			newCache := TzCache{
@@ -109,19 +144,21 @@ func resolveVpnTimezone(vpnIp string) string {
 			if cData, err := json.Marshal(newCache); err == nil {
 				_ = os.WriteFile(cacheFile, cData, 0644)
 			}
-			return info.Timezone
+			return info.Timezone, true
 		}
 	}
 
-	// 3. Fallback: check if we have any prior cached timezone
+	// 3. Fallback: check if we have any prior valid non-forbidden cached timezone
 	if data, err := os.ReadFile(cacheFile); err == nil {
 		var cache TzCache
 		if json.Unmarshal(data, &cache) == nil && cache.Timezone != "" {
-			return cache.Timezone
+			if !isForbiddenGeo("", cache.Timezone) {
+				return cache.Timezone, true
+			}
 		}
 	}
 
-	return "Europe/Amsterdam"
+	return "Europe/Amsterdam", true
 }
 
 // ensureBinaryCoveredByWfp verifies that targetExe is actively listed in WFP ClaudeKillSwitch rules.
@@ -134,6 +171,13 @@ func ensureBinaryCoveredByWfp(targetExe string) bool {
 
 	psCheck := fmt.Sprintf(`
 $target = [System.IO.Path]::GetFullPath('%s')
+# Fast-path: query CIM indexed filter directly (< 1s)
+$filter = Get-NetFirewallApplicationFilter -Program $target -ErrorAction SilentlyContinue
+if ($filter) {
+    $rule = $filter | Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.Group -eq 'ClaudeKillSwitch' } | Select-Object -First 1
+    if ($rule) { exit 0 }
+}
+# Fallback: scan rules with environment variable expansion
 $rules = Get-NetFirewallRule -Group 'ClaudeKillSwitch' -ErrorAction SilentlyContinue
 if (-not $rules) { exit 2 }
 $filters = $rules | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue
@@ -155,7 +199,7 @@ exit 3
 	}
 
 	// Target not covered: trigger elevation for Sync-ClaudeFirewall.ps1 -Enforce
-	fmt.Println("[!] Target binary is not yet covered by WFP Kill Switch (Store update detected).")
+	fmt.Println("[!] Security verification: Binary is not yet covered by active firewall policy.")
 	fmt.Println("    Requesting Administrator privileges to enforce atomic WFP rules...")
 	syncScript := filepath.Join(getCageRoot(), "Sync-ClaudeFirewall.ps1")
 	elevateCmd := fmt.Sprintf(`Start-Process powershell.exe -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File "%s" -Enforce' -Verb RunAs -Wait`, syncScript)
@@ -235,6 +279,31 @@ func runDesktopMode() int {
 	cageRoot := getCageRoot()
 	cageBin := filepath.Join(cageRoot, "bin")
 
+	// 1. Order-of-Operations: Verify host executable WFP coverage BEFORE opening any network sockets
+	selfExe, err := os.Executable()
+	if err == nil {
+		if !ensureBinaryCoveredByWfp(selfExe) {
+			fmt.Println("[!] Security verification failed: Host binary is not covered by network isolation policy. Aborting.")
+			return 1
+		}
+	}
+
+	// 2. Locate Target Executable and verify WFP coverage
+	claudeExe := findClaudeDesktopExe()
+	if claudeExe == "" {
+		fmt.Println("[!] Error: Claude Desktop executable not found on system!")
+		return 1
+	}
+
+	if !ensureBinaryCoveredByWfp(claudeExe) {
+		fmt.Println("[!] Security verification failed: Target binary is not covered by network isolation policy. Aborting.")
+		return 1
+	}
+
+	// 3. Terminate stale background processes with lock polling
+	terminateStaleClaudeProcesses()
+
+	// 4. Verify VPN tunnel status
 	vpnActive, vpnName, vpnIp := isVpnUp()
 	if !vpnActive {
 		fmt.Println("[!] [FAIL-CLOSED] No active VPN tunnel detected.")
@@ -243,29 +312,20 @@ func runDesktopMode() int {
 		fmt.Printf("[+] Active network tunnel verified: %s (%s)\n", vpnName, vpnIp)
 	}
 
-	// 1. Terminate stale background processes with lock polling
-	terminateStaleClaudeProcesses()
-
-	// 2. Resolve VPN Timezone with local caching
+	// 5. Resolve VPN Timezone with local caching and Geo-Fail-Closed verification
+	// (Safe to query ipinfo.io: host binary is strictly bound by WFP)
 	tz := "Europe/Amsterdam"
 	if vpnActive {
-		tz = resolveVpnTimezone(vpnIp)
+		var ok bool
+		tz, ok = resolveVpnTimezone(vpnIp)
+		if !ok {
+			fmt.Println("[CRITICAL ALERT] [FAIL-CLOSED] Egress IP is located in a restricted geographic region!")
+			fmt.Println("                 Execution aborted to prevent account suspension.")
+			return 1
+		}
 	}
 
-	// 3. Locate Target Executable
-	claudeExe := findClaudeDesktopExe()
-	if claudeExe == "" {
-		fmt.Println("[!] Error: Claude Desktop executable not found on system!")
-		return 1
-	}
-
-	// 4. Runtime WFP Coverage Verification (Fail-Closed)
-	if !ensureBinaryCoveredByWfp(claudeExe) {
-		fmt.Println("[SECURITY ALERT] Claude Desktop binary is NOT covered by active WFP Kill Switch! Execution aborted.")
-		return 1
-	}
-
-	// 5. Build Unified Anti-Fraud Environment (includes NODE_OPTIONS for child MCP servers)
+	// 6. Build Unified Anti-Fraud Environment (includes NODE_OPTIONS for child MCP servers)
 	envMap := map[string]string{
 		"TZ":                       tz,
 		"LANG":                     "en_US.UTF-8",
@@ -300,7 +360,7 @@ func runDesktopMode() int {
 	}
 	cmd.Env = cmdEnv
 
-	err := cmd.Start()
+	err = cmd.Start()
 	if err != nil {
 		fmt.Printf("[!] Error launching Claude Desktop: %v\n", err)
 		return 1
@@ -314,22 +374,38 @@ func runCliMode(args []string) int {
 	cageRoot := getCageRoot()
 	cageBin := filepath.Join(cageRoot, "bin")
 
-	vpnActive, _, vpnIp := isVpnUp()
-	tz := "Europe/Amsterdam"
-	if vpnActive {
-		tz = resolveVpnTimezone(vpnIp)
+	// 1. Order-of-Operations: Verify host executable WFP coverage BEFORE opening any network sockets
+	selfExe, err := os.Executable()
+	if err == nil {
+		if !ensureBinaryCoveredByWfp(selfExe) {
+			fmt.Println("[!] Security verification failed: Host binary is not covered by network isolation policy. Aborting.")
+			return 1
+		}
 	}
 
+	// 2. Locate Claude Code CLI binary and verify WFP coverage
 	claudeCliExe := findClaudeCliExe()
 	if claudeCliExe == "" {
 		fmt.Println("[!] Error: Claude Code CLI binary not found in npm node_modules!")
 		return 1
 	}
 
-	// Runtime WFP Coverage Verification (Fail-Closed)
 	if !ensureBinaryCoveredByWfp(claudeCliExe) {
-		fmt.Println("[SECURITY ALERT] Claude CLI binary is NOT covered by active WFP Kill Switch! Execution aborted.")
+		fmt.Println("[!] Security verification failed: Target binary is not covered by network isolation policy. Aborting.")
 		return 1
+	}
+
+	// 3. Verify VPN tunnel status
+	vpnActive, _, vpnIp := isVpnUp()
+	tz := "Europe/Amsterdam"
+	if vpnActive {
+		var ok bool
+		tz, ok = resolveVpnTimezone(vpnIp)
+		if !ok {
+			fmt.Println("[CRITICAL ALERT] [FAIL-CLOSED] Egress IP is located in a restricted geographic region!")
+			fmt.Println("                 Execution aborted to prevent account suspension.")
+			return 1
+		}
 	}
 
 	envMap := map[string]string{
@@ -351,7 +427,7 @@ func runCliMode(args []string) int {
 	}
 	cmd.Env = cmdEnv
 
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return exitErr.ExitCode()
