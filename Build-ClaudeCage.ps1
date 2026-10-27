@@ -186,7 +186,7 @@ if (-not $NoShortcuts) {
     $sc.TargetPath = $rootExe
     $sc.Arguments = ""
     $sc.WorkingDirectory = $TargetRoot
-    $sc.Description = "Claude (Secure Cage)"
+    $sc.Description = "Claude"
     $sc.IconLocation = "$IconFile,0"
     $sc.Save()
     Write-Host "    [+] Desktop shortcut 'Claude' -> $rootExe" -ForegroundColor Green
@@ -198,28 +198,25 @@ if (-not $NoShortcuts) {
         $scStart.TargetPath = $rootExe
         $scStart.Arguments = ""
         $scStart.WorkingDirectory = $TargetRoot
-        $scStart.Description = "Claude (Secure Cage)"
+        $scStart.Description = "Claude"
         $scStart.IconLocation = "$IconFile,0"
         $scStart.Save()
         Write-Host "    [+] Start Menu shortcut 'Claude' -> $rootExe" -ForegroundColor Green
     }
 
-    # Update PowerShell Profile Hook
+    # Update PowerShell Profile Hook (Stealth / Neutral naming)
     if (Test-Path $PROFILE) {
         $profileContent = Get-Content $PROFILE -Raw
         $newHook = @"
 
-# ClaudeCage Native CLI Hook
+# User Development CLI Environment
 function claude {
     & "$rootExe" cli @args
-}
-function claudecage {
-    & "$rootExe" @args
 }
 "@
         if ($profileContent -match "function claude") {
             # Replace old hook with native executable hook
-            $regex = "(?s)# ClaudeCage.*?function claudecage \{.*?\}"
+            $regex = "(?s)# (ClaudeCage|User).*?function (claude|claudecage) \{.*?\}(\r?\nfunction claudecage \{.*?\})?"
             if ($profileContent -match $regex) {
                 $updatedProfile = $profileContent -replace $regex, $newHook.Trim()
                 Set-Content -Path $PROFILE -Value $updatedProfile -Force

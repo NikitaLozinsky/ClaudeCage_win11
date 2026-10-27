@@ -14,8 +14,8 @@ import (
 )
 
 var (
-	Version   = "v6.3.0"
-	BuildDate = "2026-10-27T22:00:00Z"
+	Version   = "v6.3.2"
+	BuildDate = "2026-10-27T22:30:00Z"
 	Commit    = "development"
 )
 
@@ -27,11 +27,16 @@ type IpInfoResponse struct {
 	Org      string `json:"org"`
 }
 
+type TzCache struct {
+	VpnIP     string    `json:"vpn_ip"`
+	Timezone  string    `json:"timezone"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
 func getCageRoot() string {
 	exePath, err := os.Executable()
 	if err == nil {
 		dir := filepath.Dir(exePath)
-		// If running inside builds/vX or builds/latest, find ClaudeCage root
 		if strings.Contains(strings.ToLower(dir), "builds") {
 			parent := filepath.Dir(filepath.Dir(dir))
 			if _, err := os.Stat(filepath.Join(parent, "icons")); err == nil {
@@ -45,44 +50,144 @@ func getCageRoot() string {
 	return "C:\\ClaudeCage"
 }
 
-func isVpnUp() (bool, string) {
+func isVpnUp() (bool, string, string) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return false, "Unknown"
+		return false, "Unknown", ""
 	}
 	for _, iface := range interfaces {
 		name := strings.ToLower(iface.Name)
 		if iface.Flags&net.FlagUp != 0 {
-			if strings.Contains(name, "amnezia") || strings.Contains(name, "wireguard") || strings.Contains(name, "wintun") || strings.Contains(name, "vpn") {
-				return true, iface.Name
+			if strings.Contains(name, "amnezia") || strings.Contains(name, "wireguard") || strings.Contains(name, "wintun") || strings.Contains(name, "vpn") || strings.Contains(name, "tun") {
+				// Verify interface has assigned IPv4 address
+				addrs, err := iface.Addrs()
+				if err == nil {
+					for _, addr := range addrs {
+						if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+							if ipnet.IP.To4() != nil {
+								return true, iface.Name, ipnet.IP.String()
+							}
+						}
+					}
+				}
+				return true, iface.Name, "Assigned"
 			}
 		}
 	}
-	return false, "None"
+	return false, "None", ""
 }
 
-func resolveVpnTimezone() string {
+func resolveVpnTimezone(vpnIp string) string {
+	cageRoot := getCageRoot()
+	logsDir := filepath.Join(cageRoot, "logs")
+	cacheFile := filepath.Join(logsDir, "tz_cache.json")
+
+	// 1. Check local cache (valid for 1 hour for the same VPN IP)
+	if data, err := os.ReadFile(cacheFile); err == nil {
+		var cache TzCache
+		if json.Unmarshal(data, &cache) == nil {
+			if cache.VpnIP == vpnIp && cache.Timezone != "" && time.Since(cache.Timestamp) < 1*time.Hour {
+				return cache.Timezone
+			}
+		}
+	}
+
+	// 2. Fetch from ipinfo.io
 	client := http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get("https://ipinfo.io/json")
 	if err == nil && resp.StatusCode == 200 {
 		defer resp.Body.Close()
 		var info IpInfoResponse
 		if json.NewDecoder(resp.Body).Decode(&info) == nil && info.Timezone != "" {
+			// Write to cache
+			_ = os.MkdirAll(logsDir, 0755)
+			newCache := TzCache{
+				VpnIP:     vpnIp,
+				Timezone:  info.Timezone,
+				Timestamp: time.Now(),
+			}
+			if cData, err := json.Marshal(newCache); err == nil {
+				_ = os.WriteFile(cacheFile, cData, 0644)
+			}
 			return info.Timezone
 		}
 	}
+
+	// 3. Fallback: check if we have any prior cached timezone
+	if data, err := os.ReadFile(cacheFile); err == nil {
+		var cache TzCache
+		if json.Unmarshal(data, &cache) == nil && cache.Timezone != "" {
+			return cache.Timezone
+		}
+	}
+
 	return "Europe/Amsterdam"
 }
 
-func terminateStaleClaudeProcesses() {
-	cmd := exec.Command("taskkill", "/F", "/IM", "claude.exe")
+// ensureBinaryCoveredByWfp verifies that targetExe is actively listed in WFP ClaudeKillSwitch rules.
+// If missing (e.g. after background Store update), requests elevation to re-sync or aborts (Fail-Closed).
+func ensureBinaryCoveredByWfp(targetExe string) bool {
+	absTarget, err := filepath.Abs(targetExe)
+	if err != nil {
+		return false
+	}
+
+	psCheck := fmt.Sprintf(`
+$target = [System.IO.Path]::GetFullPath('%s')
+$rules = Get-NetFirewallRule -Group 'ClaudeKillSwitch' -ErrorAction SilentlyContinue
+if (-not $rules) { exit 2 }
+$filters = $rules | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue
+foreach ($f in $filters) {
+    if ($f.Program -and $f.Program -ne 'Any') {
+        try {
+            $p = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($f.Program))
+            if ($p -ieq $target) { exit 0 }
+        } catch {}
+    }
+}
+exit 3
+`, strings.ReplaceAll(absTarget, "'", "''"))
+
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command", psCheck)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	_ = cmd.Run()
-	time.Sleep(300 * time.Millisecond)
+	if err := cmd.Run(); err == nil {
+		return true
+	}
+
+	// Target not covered: trigger elevation for Sync-ClaudeFirewall.ps1 -Enforce
+	fmt.Println("[!] Target binary is not yet covered by WFP Kill Switch (Store update detected).")
+	fmt.Println("    Requesting Administrator privileges to enforce atomic WFP rules...")
+	syncScript := filepath.Join(getCageRoot(), "Sync-ClaudeFirewall.ps1")
+	elevateCmd := fmt.Sprintf(`Start-Process powershell.exe -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File "%s" -Enforce' -Verb RunAs -Wait`, syncScript)
+	uac := exec.Command("powershell.exe", "-NoProfile", "-Command", elevateCmd)
+	_ = uac.Run()
+
+	// Re-verify strictly (Fail-Closed)
+	recheck := exec.Command("powershell.exe", "-NoProfile", "-Command", psCheck)
+	recheck.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	return recheck.Run() == nil
+}
+
+// terminateStaleClaudeProcesses waits up to 3 seconds for all claude.exe processes to fully terminate
+// to prevent SingleInstanceLock pipe collisions.
+func terminateStaleClaudeProcesses() {
+	killCmd := exec.Command("taskkill", "/F", "/IM", "claude.exe", "/T")
+	killCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = killCmd.Run()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		checkCmd := exec.Command("tasklist", "/FI", "IMAGENAME eq claude.exe", "/NH")
+		checkCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		out, err := checkCmd.Output()
+		if err != nil || !strings.Contains(strings.ToLower(string(out)), "claude.exe") {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func findClaudeDesktopExe() string {
-	// 1. Try WindowsApps MSIX path
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command",
 		"(Get-AppxPackage -Name *Claude* -ErrorAction SilentlyContinue | Select-Object -First 1).InstallLocation")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
@@ -97,7 +202,6 @@ func findClaudeDesktopExe() string {
 		}
 	}
 
-	// 2. Standard Win32 paths
 	localAppData := os.Getenv("LOCALAPPDATA")
 	candidates := []string{
 		filepath.Join(localAppData, "Programs", "Claude", "Claude.exe"),
@@ -131,34 +235,44 @@ func runDesktopMode() int {
 	cageRoot := getCageRoot()
 	cageBin := filepath.Join(cageRoot, "bin")
 
-	vpnActive, vpnName := isVpnUp()
+	vpnActive, vpnName, vpnIp := isVpnUp()
 	if !vpnActive {
-		fmt.Println("[!] [CLAUDECAGE WARNING] No active VPN tunnel detected.")
-		fmt.Println("    Claude will run in strict OFFLINE mode (Fail-Closed).")
+		fmt.Println("[!] [FAIL-CLOSED] No active VPN tunnel detected.")
+		fmt.Println("    Claude will run in strict OFFLINE mode.")
 	} else {
-		fmt.Printf("[+] Active VPN tunnel verified: %s\n", vpnName)
+		fmt.Printf("[+] Active network tunnel verified: %s (%s)\n", vpnName, vpnIp)
 	}
 
-	// Terminate stale background processes
+	// 1. Terminate stale background processes with lock polling
 	terminateStaleClaudeProcesses()
 
-	// Resolve VPN Timezone
+	// 2. Resolve VPN Timezone with local caching
 	tz := "Europe/Amsterdam"
 	if vpnActive {
-		tz = resolveVpnTimezone()
+		tz = resolveVpnTimezone(vpnIp)
 	}
 
-	// Prepare Anti-Fraud environment
-	os.Setenv("TZ", tz)
-	os.Setenv("LANG", "en_US.UTF-8")
-	os.Setenv("LC_ALL", "en_US.UTF-8")
-	os.Setenv("ELECTRON_ENABLE_LOGGING", "false")
-	os.Setenv("PATH", cageBin+";"+os.Getenv("PATH"))
-
+	// 3. Locate Target Executable
 	claudeExe := findClaudeDesktopExe()
 	if claudeExe == "" {
 		fmt.Println("[!] Error: Claude Desktop executable not found on system!")
 		return 1
+	}
+
+	// 4. Runtime WFP Coverage Verification (Fail-Closed)
+	if !ensureBinaryCoveredByWfp(claudeExe) {
+		fmt.Println("[SECURITY ALERT] Claude Desktop binary is NOT covered by active WFP Kill Switch! Execution aborted.")
+		return 1
+	}
+
+	// 5. Build Unified Anti-Fraud Environment (includes NODE_OPTIONS for child MCP servers)
+	envMap := map[string]string{
+		"TZ":                       tz,
+		"LANG":                     "en_US.UTF-8",
+		"LC_ALL":                   "en_US.UTF-8",
+		"NODE_OPTIONS":             "--dns-result-order=ipv4first",
+		"ELECTRON_ENABLE_LOGGING":  "false",
+		"PATH":                     cageBin + ";" + os.Getenv("PATH"),
 	}
 
 	electronFlags := []string{
@@ -168,6 +282,9 @@ func runDesktopMode() int {
 		"--enable-features=WebRtcHideLocalIpsWithMdns",
 		"--disable-features=AsyncDns,BuiltInDnsClient,DnsOverHttpsUpgrade",
 		"--disable-quic",
+		"--disable-component-update",
+		"--disable-domain-reliability",
+		"--no-pings",
 		"--lang=en-US",
 		"--accept-lang=en-US,en",
 		"--disable-background-networking",
@@ -175,6 +292,14 @@ func runDesktopMode() int {
 
 	cmd := exec.Command(claudeExe, electronFlags...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: false}
+
+	// Construct explicit environment block
+	cmdEnv := os.Environ()
+	for k, v := range envMap {
+		cmdEnv = append(cmdEnv, fmt.Sprintf("%s=%s", k, v))
+	}
+	cmd.Env = cmdEnv
+
 	err := cmd.Start()
 	if err != nil {
 		fmt.Printf("[!] Error launching Claude Desktop: %v\n", err)
@@ -189,17 +314,11 @@ func runCliMode(args []string) int {
 	cageRoot := getCageRoot()
 	cageBin := filepath.Join(cageRoot, "bin")
 
-	vpnActive, _ := isVpnUp()
+	vpnActive, _, vpnIp := isVpnUp()
 	tz := "Europe/Amsterdam"
 	if vpnActive {
-		tz = resolveVpnTimezone()
+		tz = resolveVpnTimezone(vpnIp)
 	}
-
-	os.Setenv("TZ", tz)
-	os.Setenv("LANG", "en_US.UTF-8")
-	os.Setenv("LC_ALL", "en_US.UTF-8")
-	os.Setenv("NODE_OPTIONS", "--dns-result-order=ipv4first")
-	os.Setenv("PATH", cageBin+";"+os.Getenv("PATH"))
 
 	claudeCliExe := findClaudeCliExe()
 	if claudeCliExe == "" {
@@ -207,10 +326,30 @@ func runCliMode(args []string) int {
 		return 1
 	}
 
+	// Runtime WFP Coverage Verification (Fail-Closed)
+	if !ensureBinaryCoveredByWfp(claudeCliExe) {
+		fmt.Println("[SECURITY ALERT] Claude CLI binary is NOT covered by active WFP Kill Switch! Execution aborted.")
+		return 1
+	}
+
+	envMap := map[string]string{
+		"TZ":           tz,
+		"LANG":         "en_US.UTF-8",
+		"LC_ALL":       "en_US.UTF-8",
+		"NODE_OPTIONS": "--dns-result-order=ipv4first",
+		"PATH":         cageBin + ";" + os.Getenv("PATH"),
+	}
+
 	cmd := exec.Command(claudeCliExe, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+
+	cmdEnv := os.Environ()
+	for k, v := range envMap {
+		cmdEnv = append(cmdEnv, fmt.Sprintf("%s=%s", k, v))
+	}
+	cmd.Env = cmdEnv
 
 	err := cmd.Run()
 	if err != nil {
@@ -247,7 +386,6 @@ func runScript(scriptName string, args ...string) int {
 
 func main() {
 	if len(os.Args) == 1 {
-		// Default double-click action: Launch Claude Desktop
 		os.Exit(runDesktopMode())
 	}
 
@@ -272,7 +410,7 @@ func main() {
 		fmt.Printf("Cage Root:       %s\n", getCageRoot())
 		os.Exit(0)
 	case "help", "--help", "-h":
-		fmt.Printf("ClaudeCage Unified Native Core (%s)\n\n", Version)
+		fmt.Printf("ClaudeCage Unified Core (%s)\n\n", Version)
 		fmt.Println("Usage:")
 		fmt.Println("  ClaudeCage.exe               Launch Claude Desktop securely inside cage")
 		fmt.Println("  ClaudeCage.exe desktop       Launch Claude Desktop")
@@ -283,7 +421,6 @@ func main() {
 		fmt.Println("  ClaudeCage.exe version       Display build version and commit metadata")
 		os.Exit(0)
 	default:
-		// If unknown arg, check if user passed CLI flags directly (e.g. ClaudeCage.exe --version or -p)
 		if strings.HasPrefix(subCmd, "-") {
 			os.Exit(runCliMode(os.Args[1:]))
 		}

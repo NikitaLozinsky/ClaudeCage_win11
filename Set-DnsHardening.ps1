@@ -92,7 +92,15 @@ $targetNamespaces = @(
     ".statsigapi.net",
     ".featuregates.org",
     ".workos.com",
-    ".ipinfo.io"
+    ".ipinfo.io",
+    ".cloudfront.net",
+    ".amazonaws.com",
+    ".fastly.net",
+    ".vercel-dns.com",
+    ".vercel.app",
+    ".github.com",
+    ".githubusercontent.com",
+    ".pki.goog"
 )
 
 Add-DnsClientNrptRule -Namespace $targetNamespaces `

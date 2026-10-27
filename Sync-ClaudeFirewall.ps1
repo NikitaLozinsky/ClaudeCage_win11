@@ -95,9 +95,11 @@ function Get-CageTargetBinaries {
         }
     }
 
-    # 1. Caged node.exe & curl.exe
+    # 1. Caged binaries & Native ClaudeCage Core
     Add-TargetBinary "Sandboxed-Node" (Join-Path $CageBin "node.exe")
     Add-TargetBinary "Sandboxed-Curl" (Join-Path $CageBin "curl.exe")
+    Add-TargetBinary "ClaudeCage-Core" (Join-Path $CageRoot "ClaudeCage.exe")
+    Add-TargetBinary "ClaudeCage-Latest" (Join-Path $CageRoot "builds\latest\ClaudeCage.exe")
 
     # 2. Iterate across all real user profiles in C:\Users (guarantees NT AUTHORITY\SYSTEM finds user installations)
     $userProfiles = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { 

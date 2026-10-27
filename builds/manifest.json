@@ -1,18 +1,31 @@
 [
     {
-        "Version":  "v6.3.1",
-        "Date":  "2026-10-27T19:00:32Z",
-        "Commit":  "aa6cff4",
-        "SizeBytes":  6168064,
-        "Sha256":  "7A23AEC190C3AD376D54065311636B77421D2EA3C7713DD5EA4ED132ABAE8FC8",
-        "ExePath":  "builds/v6.3.1/ClaudeCage.exe"
+        "Version":  "v6.3.2",
+        "Date":  "2026-10-27T19:36:09Z",
+        "Commit":  "505b050",
+        "SizeBytes":  6188544,
+        "Sha256":  "B6676756A452DD0D2AABCBDF6C1FC8BA534EBDDDA8825CBCB6E88C077C35800E",
+        "ExePath":  "builds/v6.3.2/ClaudeCage.exe"
     },
     {
-        "Version":  "v6.3.0",
-        "Date":  "2026-10-27T19:00:02Z",
-        "Commit":  "aa6cff4",
-        "SizeBytes":  6168064,
-        "Sha256":  "4D08AD4A83E33F8AE1AB2AD3D71EAA48C80D04A036F48336CA785B7747F370B3",
-        "ExePath":  "builds/v6.3.0/ClaudeCage.exe"
+        "value":  [
+                      {
+                          "Version":  "v6.3.1",
+                          "Date":  "2026-10-27T19:00:32Z",
+                          "Commit":  "aa6cff4",
+                          "SizeBytes":  6168064,
+                          "Sha256":  "7A23AEC190C3AD376D54065311636B77421D2EA3C7713DD5EA4ED132ABAE8FC8",
+                          "ExePath":  "builds/v6.3.1/ClaudeCage.exe"
+                      },
+                      {
+                          "Version":  "v6.3.0",
+                          "Date":  "2026-10-27T19:00:02Z",
+                          "Commit":  "aa6cff4",
+                          "SizeBytes":  6168064,
+                          "Sha256":  "4D08AD4A83E33F8AE1AB2AD3D71EAA48C80D04A036F48336CA785B7747F370B3",
+                          "ExePath":  "builds/v6.3.0/ClaudeCage.exe"
+                      }
+                  ],
+        "Count":  2
     }
 ]
