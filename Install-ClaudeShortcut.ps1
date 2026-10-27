@@ -78,6 +78,9 @@ Write-Host "[*] Configuring shortcut with icon: $IcoPath" -ForegroundColor Cyan
 
 $wsh = New-Object -ComObject WScript.Shell
 
+$nativeExe = Join-Path $TargetRoot "ClaudeCage.exe"
+$useNative = Test-Path $nativeExe
+
 # 2. Update Desktop Shortcut
 $desktopPath = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop)
 
@@ -95,15 +98,20 @@ if (Test-Path $desktopLnk) {
 }
 
 $sc = $wsh.CreateShortcut($desktopLnk)
-$sc.TargetPath = "powershell.exe"
-$sc.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Launcher`""
-$sc.WorkingDirectory = $TargetRoot
+if ($useNative) {
+    $sc.TargetPath = $nativeExe
+    $sc.Arguments = ""
+} else {
+    $sc.TargetPath = "powershell.exe"
+    $sc.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Launcher`""
+}
+$sc.WorkingDirectory = $env:USERPROFILE
 $sc.Description = "Claude"
 if (Test-Path $IcoPath) {
     $sc.IconLocation = "$IcoPath,0"
 }
 $sc.Save()
-Write-Host "[+] Desktop shortcut 'Claude' configured securely." -ForegroundColor Green
+Write-Host "[+] Desktop shortcut 'Claude' configured securely (Cwd: $env:USERPROFILE)." -ForegroundColor Green
 
 # 3. Create / Overwrite Start Menu Shortcut
 $startMenuPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
@@ -113,13 +121,18 @@ if (Test-Path $startMenuPath) {
         Remove-Item $startLnk -Force -ErrorAction SilentlyContinue
     }
     $scStart = $wsh.CreateShortcut($startLnk)
-    $scStart.TargetPath = "powershell.exe"
-    $scStart.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Launcher`""
-    $scStart.WorkingDirectory = $TargetRoot
+    if ($useNative) {
+        $scStart.TargetPath = $nativeExe
+        $scStart.Arguments = ""
+    } else {
+        $scStart.TargetPath = "powershell.exe"
+        $scStart.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Launcher`""
+    }
+    $scStart.WorkingDirectory = $env:USERPROFILE
     $scStart.Description = "Claude"
     if (Test-Path $IcoPath) {
         $scStart.IconLocation = "$IcoPath,0"
     }
     $scStart.Save()
-    Write-Host "[+] Start Menu shortcut 'Claude' configured securely." -ForegroundColor Green
+    Write-Host "[+] Start Menu shortcut 'Claude' configured securely (Cwd: $env:USERPROFILE)." -ForegroundColor Green
 }

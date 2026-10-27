@@ -17,26 +17,40 @@ if (-not (Test-Path $profileDir)) {
     New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
 }
 
-$hookComment = "# ClaudeCage CLI Isolated Runner Hook"
-$hookScript = @"
+$nativeExe = "C:\ClaudeCage\ClaudeCage.exe"
+$useNative = Test-Path $nativeExe
 
-$hookComment
+$hookScript = if ($useNative) {
+@"
+
+# User Development CLI Environment
+function claude {
+    & "$nativeExe" cli @args
+}
+"@
+} else {
+@"
+
+# User Development CLI Environment
 function claude {
     & "C:\ClaudeCage\Invoke-ClaudeCLI.ps1" @args
 }
-function claudecage {
-    & "C:\ClaudeCage\Invoke-ClaudeCLI.ps1" @args
-}
 "@
+}
 
 $existingContent = ""
 if (Test-Path $PROFILE) {
     $existingContent = Get-Content $PROFILE -Raw
 }
 
-if ($existingContent -notmatch "ClaudeCage CLI Isolated Runner Hook") {
+$regex = "(?s)# (ClaudeCage|User).*?function (claude|claudecage) \{.*?\}(\r?\nfunction claudecage \{.*?\})?"
+if ($existingContent -match $regex) {
+    $updated = $existingContent -replace $regex, $hookScript.Trim()
+    Set-Content -Path $PROFILE -Value $updated -Force
+    Write-Host "[+] Updated CLI hook in: $PROFILE" -ForegroundColor Green
+} elseif ($existingContent -notmatch "function claude") {
     Add-Content -Path $PROFILE -Value $hookScript
-    Write-Host "[+] Installed ClaudeCage CLI hook in: $PROFILE" -ForegroundColor Green
+    Write-Host "[+] Installed CLI hook in: $PROFILE" -ForegroundColor Green
 } else {
-    Write-Host "[i] ClaudeCage hook already present in: $PROFILE" -ForegroundColor Gray
+    Write-Host "[i] CLI hook already present in: $PROFILE" -ForegroundColor Gray
 }

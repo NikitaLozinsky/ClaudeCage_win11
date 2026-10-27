@@ -108,6 +108,16 @@ if (Test-Path $initBinsScript) {
     if (Test-Path $curlSrc) { Copy-Item $curlSrc (Join-Path $CageBin "curl.exe") -Force }
 }
 
+# 3.1 Build native core if Go is available and ClaudeCage.exe is not present
+$nativeExe = Join-Path $TargetRoot "ClaudeCage.exe"
+if (-not (Test-Path $nativeExe) -and (Get-Command go -ErrorAction SilentlyContinue)) {
+    Write-Host "    [i] Go compiler detected. Building native ClaudeCage.exe..." -ForegroundColor Yellow
+    $buildScript = Join-Path $TargetRoot "Build-ClaudeCage.ps1"
+    if (Test-Path $buildScript) {
+        & $buildScript -NoShortcuts
+    }
+}
+
 # 4. Kernel DNS & Anti-Leak Hardening (NRPT + SMHNR)
 Write-Host "`n[*] [4/7] Applying Kernel DNS (NRPT) & Anti-Leak Hardening..." -ForegroundColor Yellow
 $dnsScript = Join-Path $TargetRoot "Set-DnsHardening.ps1"
@@ -182,13 +192,16 @@ Write-Host @"
   HOW TO USE:
   1. Claude Desktop (GUI):
      Double-click the standard 'Claude' icon on your Desktop or Start Menu (runs securely in cage).
+     Or execute: & "$TargetRoot\ClaudeCage.exe"
 
   2. Claude Code (CLI):
      Open any PowerShell terminal and type:
      > claude
+     Or execute: & "$TargetRoot\ClaudeCage.exe" cli [args...]
 
   3. Live Traffic Monitor:
-     > & "$TargetRoot\Watch-ClaudeCage.ps1"
+     > & "$TargetRoot\Watch-ClaudeNetworkView.ps1"
+     Or: & "$TargetRoot\ClaudeCage.exe" watch
 
   4. Emergency 1-Click Rollback:
      > & "$TargetRoot\Rollback-System.ps1"
