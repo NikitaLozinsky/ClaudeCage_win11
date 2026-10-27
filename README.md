@@ -1,12 +1,12 @@
 # 🛡️ ClaudeCage: Аппаратный WFP-бункер для Claude на Windows 11
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v6.1--release-blueviolet?style=for-the-badge" alt="Version" />
+  <img src="https://img.shields.io/badge/Release-v6.2--hardened-blueviolet?style=for-the-badge" alt="Version" />
   <img src="https://img.shields.io/badge/OS-Windows%2011-0078D4?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows 11" />
   <img src="https://img.shields.io/badge/VPN-Amnezia%20%7C%20WireGuard%20%7C%20OpenVPN-blue?style=for-the-badge&logo=wireguard&logoColor=white" alt="VPN" />
   <img src="https://img.shields.io/badge/Security-Fail--Closed%20(0ms%20Drop)-success?style=for-the-badge" alt="Fail-Closed" />
-  <img src="https://img.shields.io/badge/WFP-Kernel--Level%20Filter-orange?style=for-the-badge" alt="WFP" />
-  <img src="https://img.shields.io/badge/Tests-9%2F9%20PASS%20(Zero%20Leaks)-brightgreen?style=for-the-badge" alt="Tests" />
+  <img src="https://img.shields.io/badge/WFP-72%20Kernel%20Rules-orange?style=for-the-badge" alt="WFP" />
+  <img src="https://img.shields.io/badge/Tests-10%2F10%20PASS%20(Zero%20Leaks)-brightgreen?style=for-the-badge" alt="Tests" />
 </p>
 
 Изолированная среда («клетка») для **Claude Desktop (Electron / MSIX)** и **Claude Code (CLI)**. Гарантирует, что Claude работает **строго через VPN-туннель** (AmneziaVPN, WireGuard, OpenVPN, Tailscale), а при любом обрыве или сбое VPN **мгновенно теряет доступ в сеть (0 мс)** без малейшего шанса узнать твой реальный IP-адрес, провайдера или геолокацию.
@@ -91,7 +91,7 @@ powershell -ExecutionPolicy Bypass -File C:\ClaudeCage\Setup-ClaudeCage.ps1
 * 🛡️ **Защита от автообновлений MSIX:** лаунчер сверяет актуальный путь бинарника после обновлений Windows Store; при обновлении запрашивает разовый UAC для обновления правил и не пустит процесс в сеть без защиты.
 * 🚀 **Бесшовный ярлык на рабочем столе и в Пуске:** заменяет стандартную иконку на защищенный ярлык `Claude` (с официальным 256px логотипом).
 * 💻 **Подключит CLI-хук:** команда `claude` в любом терминале PowerShell сразу станет защищенной.
-* 🧪 **Проведет самодиагностику:** прогонит 9 тестов на утечки и выдаст зеленый отчет.
+* 🧪 **Проведет самодиагностику:** прогонит 10 тестов на утечки и выдаст зеленый отчет.
 
 ---
 
@@ -125,7 +125,7 @@ claude
    ```powershell
    & "C:\ClaudeCage\Test-CageLeaks.ps1" -Detailed
    ```
-   *Все 9 тестов должны быть зелеными `[PASS]`, IP — Нидерланды/Европа, провайдерский DNS недоступен.*
+   *Все 10 тестов должны быть зелеными `[PASS]`, IP — Нидерланды/Европа, провайдерский DNS недоступен.*
 
 2. **Краш-тест на обрыв VPN:**
    - Открой свой VPN-клиент и нажми **«Отключить»**.

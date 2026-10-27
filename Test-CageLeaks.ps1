@@ -229,6 +229,19 @@ Record-TestResult -TestName "Timezone Anti-Fraud Telemetry Spoofing" `
     -Expected "Timezone == $targetTz (Non-Russian)" `
     -Actual "Reported Timezone: $($tzObj.timeZone), Offset: $($tzObj.offset) min"
 
+# --- TEST 10: Strong Host Model & Auto-DoH Hardening ---
+$weakHostIps = Get-NetIPInterface -ErrorAction SilentlyContinue | Where-Object { $_.WeakHostSend -eq "Enabled" -or $_.WeakHostReceive -eq "Enabled" }
+$strongHostPassed = ($weakHostIps.Count -eq 0)
+
+$autoDohVal = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" -Name "EnableAutoDoh" -ErrorAction SilentlyContinue).EnableAutoDoh
+$autoDohDisabled = ($autoDohVal -eq 0)
+
+$hardenedNetPassed = ($strongHostPassed -and $autoDohDisabled)
+Record-TestResult -TestName "Strong Host Model & Auto-DoH Hardening" `
+    -Passed $hardenedNetPassed `
+    -Expected "Strong Host Model Enabled (WeakHost=Disabled) AND EnableAutoDoh = 0" `
+    -Actual "Strong Host: $(if ($strongHostPassed) { 'Enforced' } else { 'Weak interfaces detected' }), AutoDoH: $autoDohVal"
+
 # --- SUMMARY ---
 $totalTests  = $testResults.Count
 $passedTests = ($testResults | Where-Object { $_.Passed }).Count

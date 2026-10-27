@@ -185,10 +185,13 @@ if ($protectedPrograms -notcontains $resolvedTarget) {
 # Valid Chromium & Electron Anti-Telemetry / Anti-Leak Flags
 $electronFlags = @(
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--enforce-webrtc-ip-permission-check",
+    "--enable-features=WebRtcHideLocalIpsWithMdns",
+    "--disable-features=AsyncDns,BuiltInDnsClient,DnsOverHttpsUpgrade",
+    "--disable-quic",
     "--lang=en-US",
     "--accept-lang=en-US,en",
-    "--disable-features=AsyncDns,DnsOverHttpsUpgrade,WebRtcHideLocalIpsWithMdns",
     "--disable-background-networking"
 )
 

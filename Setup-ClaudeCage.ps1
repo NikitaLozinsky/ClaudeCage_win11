@@ -122,6 +122,13 @@ if (Test-Path $syncScript) {
     & $syncScript -Enforce
 }
 
+# Enable WFP Drop Auditing in Windows Security Log (Filters 5152 and 5157)
+try {
+    auditpol /set /subcategory:"{0CCE9225-69AE-11D9-BED3-505054503030}" /failure:enable | Out-Null
+    auditpol /set /subcategory:"{0CCE9226-69AE-11D9-BED3-505054503030}" /failure:enable | Out-Null
+    Write-Host "    [+] WFP kernel-level drop auditing enabled (Event ID 5152/5157)." -ForegroundColor Green
+} catch {}
+
 # 6. Setup Shortcuts and Profile Hook
 Write-Host "`n[*] [6/7] Configuring CLI profile hook and desktop shortcut..." -ForegroundColor Yellow
 

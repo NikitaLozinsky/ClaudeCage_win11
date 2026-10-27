@@ -194,6 +194,24 @@ try {
                     }
                 }
             }
+
+            # 3.1 Kernel WFP Drop Audit (Event ID 5152/5157 from Security Event Log)
+            try {
+                $recentDrops = Get-WinEvent -FilterHashtable @{LogName='Security'; Id=5152,5157; StartTime=(Get-Date).AddSeconds(-($IntervalSeconds + 1))} -ErrorAction SilentlyContinue
+                foreach ($evt in $recentDrops) {
+                    $appPath = [string]$evt.Properties[1].Value
+                    if ($appPath -match "claude|node|curl|git|ssh") {
+                        $pId     = [int]$evt.Properties[0].Value
+                        $srcAddr = [string]$evt.Properties[3].Value
+                        $dstAddr = [string]$evt.Properties[5].Value
+                        $dstPort = [string]$evt.Properties[6].Value
+                        $metrics.ConnectionsBlockedWfp++
+                        $metrics.DirectLeakAttempts++
+                        Write-CageLog "KERNEL-DROP" "[WFP 0-ms DROP] $appPath [PID:$pId] Packet dropped by kernel: $srcAddr -> ${dstAddr}:$dstPort" Red
+                    }
+                }
+            } catch {}
+            }
         }
 
         # 4. Save Metrics JSON Snapshot

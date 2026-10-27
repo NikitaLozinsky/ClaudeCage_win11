@@ -109,6 +109,9 @@ if (-not $claudeCliExe) {
 
 # Verify Binary is Protected by WFP Kill Switch
 $resolvedTarget = [System.IO.Path]::GetFullPath($claudeCliExe)
+if ($claudeCliExe -like "*.cmd" -or $claudeCliExe -like "*.bat") {
+    $resolvedTarget = [System.IO.Path]::GetFullPath((Join-Path $CageBin "node.exe"))
+}
 $appFilters = Get-NetFirewallRule -Group "ClaudeKillSwitch" -ErrorAction SilentlyContinue | Get-NetFirewallApplicationFilter
 $protectedPrograms = @($appFilters | Select-Object -ExpandProperty Program -Unique | Where-Object { $_ -and $_ -ne "Any" } | ForEach-Object {
     try { [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($_)) } catch { $_ }

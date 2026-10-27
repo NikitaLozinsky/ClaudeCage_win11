@@ -87,7 +87,12 @@ $targetNamespaces = @(
     ".claude.com",
     ".sentry.io",
     ".stripe.com",
-    ".intercom.io"
+    ".intercom.io",
+    ".statsig.com",
+    ".statsigapi.net",
+    ".featuregates.org",
+    ".workos.com",
+    ".ipinfo.io"
 )
 
 Add-DnsClientNrptRule -Namespace $targetNamespaces `
@@ -109,6 +114,22 @@ Write-Host "    [+] Smart Multi-Homed Name Resolution (SMHNR) DISABLED." -Foregr
 
 Set-ItemProperty -Path $dnsPolicyKey -Name "EnableMulticast" -Value 0 -Type DWord
 Write-Host "    [+] LLMNR Multicast DISABLED." -ForegroundColor Green
+
+# 2.1 Disable Auto-DoH (DNS-over-HTTPS) & WPAD
+$dnscacheParamsKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters"
+if (-not (Test-Path $dnscacheParamsKey)) { New-Item -Path $dnscacheParamsKey -Force | Out-Null }
+Set-ItemProperty -Path $dnscacheParamsKey -Name "EnableAutoDoh" -Value 0 -Type DWord -Force
+Write-Host "    [+] Windows 11 Native Auto-DoH DISABLED." -ForegroundColor Green
+
+$tcpipParamsKey = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+if (-not (Test-Path $tcpipParamsKey)) { New-Item -Path $tcpipParamsKey -Force | Out-Null }
+Set-ItemProperty -Path $tcpipParamsKey -Name "DisableWpad" -Value 1 -Type DWord -Force
+Write-Host "    [+] WPAD Proxy Auto-Discovery DISABLED." -ForegroundColor Green
+
+# 2.2 Enable Strong Host Model (Prevents cross-adapter teardown packet leaks)
+Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue | Set-NetIPInterface -WeakHostSend Disabled -WeakHostReceive Disabled -ErrorAction SilentlyContinue
+Get-NetIPInterface -AddressFamily IPv6 -ErrorAction SilentlyContinue | Set-NetIPInterface -WeakHostSend Disabled -WeakHostReceive Disabled -ErrorAction SilentlyContinue
+Write-Host "    [+] Strong Host Model ENABLED on all interfaces." -ForegroundColor Green
 
 # 3. Deny Windows Location API access
 $locConsentKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location\NonPackaged"

@@ -99,57 +99,101 @@ function Get-CageTargetBinaries {
     Add-TargetBinary "Sandboxed-Node" (Join-Path $CageBin "node.exe")
     Add-TargetBinary "Sandboxed-Curl" (Join-Path $CageBin "curl.exe")
 
-    # 2. Claude CLI standalone binary
-    $cliCandidates = @(
-        "$env:APPDATA\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe",
-        "$env:LOCALAPPDATA\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe",
-        "$env:USERPROFILE\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"
-    )
-    foreach ($cand in $cliCandidates) {
-        if (Test-Path $cand) {
-            Add-TargetBinary "Claude-CLI" $cand
-            break
+    # 2. Iterate across all real user profiles in C:\Users (guarantees NT AUTHORITY\SYSTEM finds user installations)
+    $userProfiles = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { 
+        $_.Name -notin @("Public", "Default", "Default User", "All Users") 
+    }
+
+    foreach ($uProf in $userProfiles) {
+        $uRoot = $uProf.FullName
+        # Claude CLI binaries
+        $cliPaths = @(
+            "$uRoot\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe",
+            "$uRoot\AppData\Local\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe",
+            "$uRoot\.claude\local\node_modules\@anthropic-ai\claude-code\bin\claude.exe"
+        )
+        foreach ($cp in $cliPaths) {
+            Add-TargetBinary "Claude-CLI-$($uProf.Name)" $cp
+        }
+
+        # Win32 Claude Desktop paths
+        $win32Paths = @(
+            "$uRoot\AppData\Local\Programs\Claude\Claude.exe",
+            "$uRoot\AppData\Local\AnthropicClaude\Claude.exe"
+        )
+        foreach ($wp in $win32Paths) {
+            Add-TargetBinary "Claude-Win32-$($uProf.Name)" $wp
+        }
+
+        # User MCP configurations
+        $mcpConfig = "$uRoot\AppData\Roaming\Claude\claude_desktop_config.json"
+        if (Test-Path $mcpConfig) {
+            try {
+                $json = Get-Content $mcpConfig -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+                if ($json.mcpServers) {
+                    $mcpIdx = 0
+                    foreach ($prop in $json.mcpServers.PSObject.Properties) {
+                        $cmd = $prop.Value.command
+                        if ($cmd) {
+                            $resolved = (Get-Command $cmd -ErrorAction SilentlyContinue).Source
+                            if (-not $resolved -and (Test-Path $cmd)) { $resolved = $cmd }
+                            if ($resolved) {
+                                Add-TargetBinary "MCP-$($prop.Name)-$($uProf.Name)-$mcpIdx" $resolved
+                                $mcpIdx++
+                            }
+                        }
+                    }
+                }
+            } catch {}
         }
     }
 
-    # 3. Claude Desktop AppX / MSIX package family
-    $claudeAppx = Get-AppxPackage -Name *Claude* -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($claudeAppx) {
+    # 3. Claude Desktop AppX / MSIX package family (-AllUsers is mandatory for SYSTEM task)
+    $claudeAppxList = Get-AppxPackage -AllUsers -Name *Claude* -ErrorAction SilentlyContinue
+    if ($claudeAppxList) {
+        $firstAppx = $claudeAppxList | Select-Object -First 1
         $targets.Add([PSCustomObject]@{
             Name              = "Claude-Desktop-MSIX"
             Type              = "PackageFamily"
             Path              = $null
-            PackageFamilyName = $claudeAppx.PackageFamilyName
+            PackageFamilyName = $firstAppx.PackageFamilyName
         })
 
-        $appxExe = Join-Path $claudeAppx.InstallLocation "app\claude.exe"
-        Add-TargetBinary "Claude-Desktop-AppX-Exe" $appxExe
+        foreach ($appx in $claudeAppxList) {
+            if ($appx.InstallLocation) {
+                $appxExe = Join-Path $appx.InstallLocation "app\claude.exe"
+                Add-TargetBinary "Claude-Desktop-AppX-Exe" $appxExe
+            }
+        }
     }
 
     # Dynamic search for all Claude installations in WindowsApps (survives store updates)
     $windowsAppsDirs = Get-ChildItem -Path "C:\Program Files\WindowsApps" -Filter "*Claude*" -Directory -ErrorAction SilentlyContinue
+    $idx = 0
     foreach ($dir in $windowsAppsDirs) {
         $candExe = Join-Path $dir.FullName "app\claude.exe"
         if (Test-Path $candExe) {
-            Add-TargetBinary "Claude-WindowsApps-Versioned" $candExe
+            Add-TargetBinary "Claude-WindowsApps-$idx" $candExe
+            $idx++
         }
     }
 
-    # Standard Win32 Claude Desktop installs if present
-    $desktopCandidates = @(
-        "$env:LOCALAPPDATA\Programs\Claude\Claude.exe",
-        "$env:LOCALAPPDATA\AnthropicClaude\Claude.exe",
-        "C:\Program Files\Claude\Claude.exe"
-    )
-    foreach ($cand in $desktopCandidates) {
-        Add-TargetBinary "Claude-Desktop-Win32" $cand
+    # Global Machine Win32
+    if (Test-Path "C:\Program Files\Claude\Claude.exe") {
+        Add-TargetBinary "Claude-Desktop-ProgramFiles" "C:\Program Files\Claude\Claude.exe"
     }
 
-    # 4. Git Network Binaries (prevents git fetch / git push leaks)
-    $gitDirs = @("C:\Program Files\Git", "C:\Program Files (x86)\Git", "$env:LOCALAPPDATA\Programs\Git")
+    # 4. Git & SSH Network Binaries (prevents git fetch / git push leaks)
+    $gitDirs = @(
+        "C:\Program Files\Git",
+        "C:\Program Files (x86)\Git",
+        "$env:LOCALAPPDATA\Programs\Git"
+    )
     $gitRelativeBins = @(
         "cmd\git.exe",
+        "bin\git.exe",
         "mingw64\bin\git.exe",
+        "mingw64\bin\git-remote-https.exe",
         "mingw64\libexec\git-core\git-remote-https.exe",
         "mingw64\libexec\git-core\git-remote-http.exe",
         "usr\bin\ssh.exe"
@@ -157,28 +201,18 @@ function Get-CageTargetBinaries {
     foreach ($gDir in $gitDirs) {
         if (Test-Path $gDir) {
             foreach ($rel in $gitRelativeBins) {
-                Add-TargetBinary ("Git-" + [System.IO.Path]::GetFileNameWithoutExtension($rel)) (Join-Path $gDir $rel)
+                $fPath = Join-Path $gDir $rel
+                if (Test-Path $fPath) {
+                    Add-TargetBinary ("Git-" + [System.IO.Path]::GetFileNameWithoutExtension($rel)) $fPath
+                }
             }
         }
     }
 
-    # 5. MCP Server Binaries from claude_desktop_config.json
-    $claudeConfig = "$env:APPDATA\Claude\claude_desktop_config.json"
-    if (Test-Path $claudeConfig) {
-        try {
-            $json = Get-Content $claudeConfig -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
-            if ($json.mcpServers) {
-                foreach ($prop in $json.mcpServers.PSObject.Properties) {
-                    $cmd = $prop.Value.command
-                    if ($cmd) {
-                        $resolved = (Get-Command $cmd -ErrorAction SilentlyContinue).Source
-                        if ($resolved) {
-                            Add-TargetBinary "MCP-$($prop.Name)" $resolved
-                        }
-                    }
-                }
-            }
-        } catch {}
+    # System OpenSSH (in System32, often invoked by git or terminal)
+    $sysSsh = "C:\Windows\System32\OpenSSH\ssh.exe"
+    if (Test-Path $sysSsh) {
+        Add-TargetBinary "System-OpenSSH" $sysSsh
     }
 
     return $targets
@@ -293,10 +327,23 @@ $blockedLanRanges = @(
     "169.254.0.0/16",
     "224.0.0.0/4"
 )
+if (-not ($vpnIp -and $vpnIp -like "10.*")) {
+    $blockedLanRanges += "10.0.0.0/8"
+}
 
-# Dual-layer IPv6 Block
-$blockedIpv6Remote = @("2000::/3", "fc00::/7", "fe80::/10")
-$blockedIpv6Local  = @("0000::-0000:ffff:ffff:ffff:ffff:ffff:ffff:fffe", "0001::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
+# Non-tunnel DNS Port Lock (UDP/TCP 53, 853)
+$blockedDnsRemote = if ($vpnIp -and $vpnIp -like "10.*") {
+    @("0.0.0.0-9.255.255.255", "11.0.0.0-255.255.255.255")
+} else {
+    @("0.0.0.0-100.63.255.255", "100.128.0.0-255.255.255.255")
+}
+
+# Dual-layer IPv6 Block (Unconditional across all IPv6 local addresses)
+$blockedIpv6Local = @("0000::-0000:ffff:ffff:ffff:ffff:ffff:ffff:fffe", "0001::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
+
+# Enforce Strong Host Model on all interfaces
+Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue | Set-NetIPInterface -WeakHostSend Disabled -WeakHostReceive Disabled -ErrorAction SilentlyContinue
+Get-NetIPInterface -AddressFamily IPv6 -ErrorAction SilentlyContinue | Set-NetIPInterface -WeakHostSend Disabled -WeakHostReceive Disabled -ErrorAction SilentlyContinue
 
 # 4. Snapshot existing rules for Make-Before-Break atomic transition
 $oldRules = Get-NetFirewallRule | Where-Object { $_.Group -eq $GroupName -or $_.Name -like "ClaudeCage*" }
@@ -355,19 +402,43 @@ try {
         }
         $newRuleNames.Add($r3Name)
 
-        # RULE 4: Block Outbound IPv6 (Remote & Local Source)
+        # RULE 4: Block Outbound IPv6 Unconditionally (Closes ff00::/8 multicast & mDNS bypass)
         $r4Name = "ClaudeCage-$genTag-IPv6-$safeName"
         $r4Display = "Claude Cage: Block IPv6 for $($t.Name)"
         if ($t.Type -eq "PackageFamily") {
             New-NetFirewallRule -Name $r4Name -DisplayName $r4Display -Group $GroupName `
                 -Direction Outbound -Action Block -PackageFamilyName $t.PackageFamilyName `
-                -Protocol Any -RemoteAddress $blockedIpv6Remote -LocalAddress $blockedIpv6Local -Enabled True | Out-Null
+                -Protocol Any -LocalAddress $blockedIpv6Local -Enabled True | Out-Null
         } else {
             New-NetFirewallRule -Name $r4Name -DisplayName $r4Display -Group $GroupName `
                 -Direction Outbound -Action Block -Program $t.Path `
-                -Protocol Any -RemoteAddress $blockedIpv6Remote -LocalAddress $blockedIpv6Local -Enabled True | Out-Null
+                -Protocol Any -LocalAddress $blockedIpv6Local -Enabled True | Out-Null
         }
         $newRuleNames.Add($r4Name)
+
+        # RULE 5: Strict Non-Tunnel DNS Port Lock (Blocks direct UDP/TCP 53 and 853 to non-tunnel DNS)
+        $r5NameUdp = "ClaudeCage-$genTag-DnsUdp-$safeName"
+        $r5DisplayUdp = "Claude Cage: Block Non-Tunnel DNS UDP 53/853 for $($t.Name)"
+        $r5NameTcp = "ClaudeCage-$genTag-DnsTcp-$safeName"
+        $r5DisplayTcp = "Claude Cage: Block Non-Tunnel DNS TCP 53/853 for $($t.Name)"
+
+        if ($t.Type -eq "PackageFamily") {
+            New-NetFirewallRule -Name $r5NameUdp -DisplayName $r5DisplayUdp -Group $GroupName `
+                -Direction Outbound -Action Block -PackageFamilyName $t.PackageFamilyName `
+                -Protocol UDP -RemotePort @("53", "853") -RemoteAddress $blockedDnsRemote -Enabled True | Out-Null
+            New-NetFirewallRule -Name $r5NameTcp -DisplayName $r5DisplayTcp -Group $GroupName `
+                -Direction Outbound -Action Block -PackageFamilyName $t.PackageFamilyName `
+                -Protocol TCP -RemotePort @("53", "853") -RemoteAddress $blockedDnsRemote -Enabled True | Out-Null
+        } else {
+            New-NetFirewallRule -Name $r5NameUdp -DisplayName $r5DisplayUdp -Group $GroupName `
+                -Direction Outbound -Action Block -Program $t.Path `
+                -Protocol UDP -RemotePort @("53", "853") -RemoteAddress $blockedDnsRemote -Enabled True | Out-Null
+            New-NetFirewallRule -Name $r5NameTcp -DisplayName $r5DisplayTcp -Group $GroupName `
+                -Direction Outbound -Action Block -Program $t.Path `
+                -Protocol TCP -RemotePort @("53", "853") -RemoteAddress $blockedDnsRemote -Enabled True | Out-Null
+        }
+        $newRuleNames.Add($r5NameUdp)
+        $newRuleNames.Add($r5NameTcp)
 
         Write-Host "    [+] Enforced 24/7 Security Policies for: $($t.Name)" -ForegroundColor Green
     }
